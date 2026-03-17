@@ -54,7 +54,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 If you use this skill in your research, please cite the original paper:
 
 ```bibtex
-@article{zhang2025scientific,
+@article{zhang2026scientific,
   title={Scientific discovery as meta-optimization: a combinatorial optimization case study},
   author={Zhang, Yuan-Hang and Sipling, Chesson and Di Ventra, Massimiliano},
   journal={Research Square preprint},
