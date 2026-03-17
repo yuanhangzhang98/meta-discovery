@@ -38,6 +38,7 @@ def execute_node(
     node_id: int,
     repo_dir: str = ".",
     timeout: int = 300,
+    fidelity: str | None = None,
 ) -> float | None:
     """Execute the objective function for a specific node.
 
@@ -46,6 +47,9 @@ def execute_node(
         node_id: ID of the node to evaluate
         repo_dir: Path to the git repository
         timeout: Maximum seconds to run the objective script
+        fidelity: Optional fidelity tier name (e.g., "low", "medium", "high").
+            If set, uses the tier's timeout and sets env vars from the tier config.
+            Results are stored under node.fidelity_results[tier_name].
 
     Returns:
         The objective value if successful, None if failed.
@@ -56,9 +60,20 @@ def execute_node(
         print(f"Error: Node {node_id} not found in graph", file=sys.stderr)
         return None
 
-    if node.status == "evaluated" and node.objective is not None:
+    if node.status == "evaluated" and node.objective is not None and fidelity is None:
         print(f"Node {node_id} already evaluated (objective={node.objective:.4f})")
         return node.objective
+
+    # Resolve fidelity tier config
+    fidelity_env: dict[str, str] = {}
+    if fidelity and graph.config.multi_fidelity:
+        for tier in graph.config.fidelity_tiers:
+            if tier["name"] == fidelity:
+                timeout = tier.get("timeout", timeout)
+                fidelity_env = tier.get("env", {})
+                break
+        else:
+            print(f"Warning: Fidelity tier '{fidelity}' not found in config", file=sys.stderr)
 
     # Choose which script to run: experiment_script (multi-objective) or objective_script (single)
     multi_objective = graph.config.multi_objective
@@ -83,13 +98,16 @@ def execute_node(
             )
 
         # Run the script
-        print(f"Running {'experiment' if multi_objective else 'objective'} script: {script_name} (timeout={timeout}s)...")
+        fid_label = f", fidelity={fidelity}" if fidelity else ""
+        print(f"Running {'experiment' if multi_objective else 'objective'} script: {script_name} (timeout={timeout}s{fid_label})...")
+        run_env = {**os.environ, **fidelity_env}
         result = subprocess.run(
             [sys.executable, script_name],
             cwd=str(worktree_dir),
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=run_env,
         )
 
         # Store stdout/stderr for debugging
@@ -118,6 +136,10 @@ def execute_node(
         try:
             experiment_results = json.loads(last_line)
             if isinstance(experiment_results, dict):
+                # Store fidelity-specific results if applicable
+                if fidelity:
+                    node.fidelity_results[fidelity] = experiment_results
+                # Always set experiment_results to latest (highest-fidelity) results
                 node.experiment_results = experiment_results
                 node.status = "evaluated"
                 # In multi-objective mode, objective is set later by consensus.py
@@ -182,6 +204,8 @@ def main():
     parser.add_argument("--graph", default="mcgs_graph.json", help="Path to graph JSON")
     parser.add_argument("--repo-dir", default=".", help="Path to the git repository")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
+    parser.add_argument("--fidelity", default=None,
+                        help="Fidelity tier name (e.g., 'low', 'medium', 'high')")
     args = parser.parse_args()
 
     result = execute_node(
@@ -189,6 +213,7 @@ def main():
         node_id=args.node_id,
         repo_dir=args.repo_dir,
         timeout=args.timeout,
+        fidelity=args.fidelity,
     )
 
     if result is None:

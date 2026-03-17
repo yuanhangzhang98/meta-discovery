@@ -276,7 +276,10 @@ def compute_objective_weights(
         # Meta-agent weight multiplier
         meta_weight = obj_meta.weight
 
-        weights[name] = agreement * decay * meta_weight
+        # Meta-agent additive override (bypasses agreement-based zero)
+        adder = obj_meta.weight_adder
+
+        weights[name] = max(agreement * decay * meta_weight + adder, 0.0)
 
     # Normalize to sum to 1
     total = sum(weights.values())

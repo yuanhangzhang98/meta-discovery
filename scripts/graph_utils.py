@@ -41,6 +41,7 @@ class ObjectiveMeta:
     description: str
     created_iteration: int  # which MCGS iteration spawned this
     weight: float = 1.0     # meta-agent weight multiplier (default neutral)
+    weight_adder: float = 0.0  # meta-agent additive override (bypasses agreement-based zero)
     active: bool = True
 
     def to_dict(self) -> dict:
@@ -58,6 +59,7 @@ class MetaState:
     research_assessment: str = ""
     objective_directions: str = ""
     weight_adjustments: Dict[str, float] = field(default_factory=dict)  # obj_name -> multiplier
+    weight_adders: Dict[str, float] = field(default_factory=dict)  # obj_name -> additive override
     history: List[Dict[str, Any]] = field(default_factory=list)  # past analysis snapshots
 
     def to_dict(self) -> dict:
@@ -66,6 +68,7 @@ class MetaState:
             "research_assessment": self.research_assessment,
             "objective_directions": self.objective_directions,
             "weight_adjustments": self.weight_adjustments,
+            "weight_adders": self.weight_adders,
             "history": self.history,
         }
 
@@ -76,6 +79,7 @@ class MetaState:
             research_assessment=d.get("research_assessment", ""),
             objective_directions=d.get("objective_directions", ""),
             weight_adjustments=d.get("weight_adjustments", {}),
+            weight_adders=d.get("weight_adders", {}),
             history=d.get("history", []),
         )
 
@@ -86,6 +90,7 @@ class MetaState:
             "research_assessment": self.research_assessment,
             "objective_directions": self.objective_directions,
             "weight_adjustments": dict(self.weight_adjustments),
+            "weight_adders": dict(self.weight_adders),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -110,6 +115,11 @@ class GraphNode:
     experiment_results: Optional[Dict[str, Any]] = None  # raw JSON from experiment script
     objective_scores: Optional[Dict[str, float]] = None   # obj_name -> score
     consensus_score: Optional[float] = None                # weighted Borda consensus
+    # Multi-fidelity fields
+    fidelity_level: int = 0                                # 0=low, 1=medium, 2=high
+    fidelity_results: Dict[str, Any] = field(default_factory=dict)  # tier_name -> results
+    # HPO fields
+    is_hpo_tuned: bool = False                             # True if created by HPO
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -136,6 +146,9 @@ class GraphNode:
             experiment_results=d.get("experiment_results"),
             objective_scores=d.get("objective_scores"),
             consensus_score=d.get("consensus_score"),
+            fidelity_level=d.get("fidelity_level", 0),
+            fidelity_results=d.get("fidelity_results", {}),
+            is_hpo_tuned=d.get("is_hpo_tuned", False),
         )
 
 
@@ -154,6 +167,20 @@ class GraphConfig:
     objective_interval: int = 5          # generate new objective every N iterations
     meta_interval: int = 10              # run meta-agent analysis every N iterations
     age_decay: float = 0.9              # lambda for objective age decay in consensus
+    # Multi-fidelity configuration
+    multi_fidelity: bool = False         # enable multi-fidelity execution
+    fidelity_tiers: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"name": "low", "timeout": 60, "env": {"MCGS_FIDELITY": "low"}},
+        {"name": "medium", "timeout": 300, "env": {"MCGS_FIDELITY": "medium"}},
+        {"name": "high", "timeout": 1800, "env": {"MCGS_FIDELITY": "high"}},
+    ])
+    promotion_thresholds: List[float] = field(default_factory=lambda: [0.5, 0.1])
+    # HPO configuration
+    hpo_backend: str = "optuna"          # "optuna" or "hebo"
+    hpo_interval: int = 10               # run HPO every N iterations
+    hpo_max_iter: int = 50               # max HPO iterations per run
+    hpo_max_ratio: float = 0.1           # max ratio of tuned to total nodes
+    hyper_space_file: str = ""            # path to file containing HYPER_SPACE (relative to repo root)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -178,6 +205,8 @@ class MCGSGraph:
     # Multi-objective state
     objectives: List[ObjectiveMeta] = field(default_factory=list)
     meta_state: Optional[MetaState] = None
+    # Accumulated lessons for subagent context
+    lessons_learned: List[str] = field(default_factory=list)
 
     # ── Serialization ────────────────────────────────────────────────────
 
@@ -192,6 +221,8 @@ class MCGSGraph:
             d["objectives"] = [o.to_dict() for o in self.objectives]
         if self.meta_state is not None:
             d["meta_state"] = self.meta_state.to_dict()
+        if self.lessons_learned:
+            d["lessons_learned"] = self.lessons_learned
         return d
 
     @classmethod
@@ -207,6 +238,7 @@ class MCGSGraph:
             total_iterations=d.get("total_iterations", 0),
             objectives=objectives,
             meta_state=meta_state,
+            lessons_learned=d.get("lessons_learned", []),
         )
 
     # ── Node operations ──────────────────────────────────────────────────
@@ -285,6 +317,21 @@ class MCGSGraph:
         for obj in self.objectives:
             if obj.name in weight_adjustments:
                 obj.weight = weight_adjustments[obj.name]
+
+    def apply_meta_adders(self, adder_adjustments: Dict[str, float]) -> None:
+        """Apply meta-agent additive weight overrides to objectives by name.
+
+        The adder bypasses the agreement-based zero in consensus, giving the
+        objective guaranteed influence even when negatively correlated with others.
+        """
+        for obj in self.objectives:
+            if obj.name in adder_adjustments:
+                obj.weight_adder = adder_adjustments[obj.name]
+
+    def add_lesson(self, text: str) -> None:
+        """Add a lesson learned if not already present (deduplicates)."""
+        if text not in self.lessons_learned:
+            self.lessons_learned.append(text)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -407,6 +454,35 @@ def git_list_branches(repo_dir: str | Path = ".", pattern: str = "mcgs/node-*") 
     return [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
 
 
+def cleanup_stale_worktrees(repo_dir: str | Path = ".") -> List[str]:
+    """Remove stale MCGS worktrees (mcgs-worktree-* and mcgs-eval-*).
+
+    Returns list of removed worktree paths.
+    """
+    repo_dir = Path(repo_dir)
+    result = _run_git(["worktree", "list", "--porcelain"], cwd=repo_dir, check=False)
+    if result.returncode != 0:
+        return []
+
+    removed = []
+    current_path = None
+    for line in result.stdout.split("\n"):
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):]
+        elif line == "" and current_path:
+            # Check if it's an MCGS worktree
+            name = Path(current_path).name
+            if name.startswith("mcgs-worktree-") or name.startswith("mcgs-eval-"):
+                _run_git(["worktree", "remove", current_path, "--force"],
+                         cwd=repo_dir, check=False)
+                removed.append(current_path)
+            current_path = None
+
+    # Also prune any dangling worktree references
+    _run_git(["worktree", "prune"], cwd=repo_dir, check=False)
+    return removed
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Graph formatting (for planner prompts)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -510,8 +586,23 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="MCGS graph utilities")
     parser.add_argument("--graph", default="mcgs_graph.json", help="Path to graph JSON")
-    parser.add_argument("--action", choices=["show", "summary", "table", "objectives"], default="show")
+    parser.add_argument("--action",
+                        choices=["show", "summary", "table", "objectives",
+                                 "cleanup-worktrees", "add-lesson"],
+                        default="show")
+    parser.add_argument("--repo-dir", default=".", help="Path to the git repository")
+    parser.add_argument("--text", default="", help="Text for add-lesson action")
     args = parser.parse_args()
+
+    if args.action == "cleanup-worktrees":
+        removed = cleanup_stale_worktrees(args.repo_dir)
+        if removed:
+            print(f"Removed {len(removed)} stale worktrees:")
+            for p in removed:
+                print(f"  {p}")
+        else:
+            print("No stale worktrees found.")
+        sys.exit(0)
 
     graph = load_graph(args.graph)
     if args.action == "show":
@@ -522,3 +613,10 @@ if __name__ == "__main__":
         print(format_node_table(graph))
     elif args.action == "objectives":
         print(format_objective_table(graph))
+    elif args.action == "add-lesson":
+        if not args.text:
+            print("Error: --text required for add-lesson", file=sys.stderr)
+            sys.exit(1)
+        graph.add_lesson(args.text)
+        save_graph(graph, args.graph)
+        print(f"Added lesson. Total: {len(graph.lessons_learned)}")

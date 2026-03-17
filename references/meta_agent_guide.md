@@ -31,13 +31,21 @@ Classify the current phase:
 
 ### 2. Weight Adjustments
 
-For each active objective, assign a weight multiplier (0.0 to 2.0):
+For each active objective, you have two controls:
+
+**Weight multiplier** (0.0 to 2.0) — scales the agreement-based weight:
 - **1.0** (default): no change
 - **> 1.0**: amplify this objective's influence (it captures something valuable that others miss)
 - **< 1.0**: reduce influence (it's redundant or slightly misleading)
-- **0.0**: effectively disable (it's clearly harmful — anti-correlated with consensus)
+- **0.0**: effectively disable (it's clearly harmful)
 
-Be conservative. Only adjust weights when you see clear evidence. The consensus mechanism already handles most cases through its agreement-based weighting.
+**Weight adder** (0.0 to 1.0) — bypasses the agreement-based zero:
+- **0.0** (default): no override; the consensus mechanism decides
+- **> 0.0**: guarantees this objective gets at least this much influence, even if negatively correlated with others. Use this to rescue objectives that the consensus suppresses but that you believe capture a genuinely important quality dimension.
+
+The formula is: `weight = agreement × age_decay × multiplier + adder`
+
+Be conservative. Only adjust weights when you see clear evidence. The consensus mechanism handles most cases through its agreement-based weighting. Use the adder only when you have strong strategic reasons to override the consensus.
 
 ### 3. Objective Directions
 
@@ -60,6 +68,9 @@ Store your analysis in `graph.meta_state` as a JSON structure:
         "scaling_exponent": 1.2,
         "raw_runtime": 0.5,
         "step_efficiency": 1.0
+    },
+    "weight_adders": {
+        "frustration_robustness": 0.1
     }
 }
 ```

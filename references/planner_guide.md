@@ -89,3 +89,6 @@ Respond with a JSON block containing all six required fields:
 Be specific. Instead of "improve performance", say "Node 7 added a gating mechanism that improved the objective by 15%. Try applying a similar gating approach to the loss function, using the threshold pattern from node 3."
 
 The Designer will make ONE small, principled modification. Your direction should guide them toward a specific change, not a vague goal.
+
+### Lessons Learned
+Pay attention to the "Lessons Learned" section in your prompt — it contains constraints and patterns discovered during the search. For example, certain files may be protected, certain approaches may have consistently failed, or certain code patterns may cause execution errors. Factor these into your direction to avoid wasting iterations.

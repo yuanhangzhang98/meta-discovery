@@ -42,18 +42,28 @@ def objective(experiment_results: dict) -> float:
 
 > The orchestrator validates your objective by test-calling it on sample experiment data. If it fails (non-finite return, import errors, missing `objective` function, forbidden imports), you will be asked to fix it.
 
+## Design Philosophy: Holistic Proxy Objectives
+
+Each objective you create should be a **holistic proxy of the true research goal**, not a narrow single-aspect metric. The consensus mechanism works best when all objectives are trying to approximate the same underlying quality from different angles.
+
+**Key principles:**
+- **Don't design objectives that capture only one narrow aspect** (e.g., only speed, or only accuracy). Instead, consider all relevant dimensions and balance them within a single objective function.
+- **If two qualities naturally compete** (e.g., runtime vs. solution quality), include both in your objective with appropriate weighting rather than creating separate objectives that will fight each other in consensus.
+- **Objectives that are negatively correlated with the majority get zero consensus weight.** Design objectives that align with the overall research direction — the consensus is designed to suppress disagreeing objectives.
+- Each objective should answer: "If I could only use one number to judge a design, what would it be?" That number should reflect overall quality, not a single facet.
+
 ## Differentiation Strategy
 
-The consensus aggregation uses Kendall tau correlation to measure agreement between objectives. Objectives that rank designs identically provide redundant information. Your goal is to bring a genuinely different perspective:
+The consensus aggregation uses Kendall tau correlation to measure agreement between objectives. Objectives that rank designs identically provide redundant information. Your goal is to bring a genuinely different perspective while still aligning with the research goal:
 
-- **If existing objectives are highly correlated** (tau > 0.7 between most pairs): propose something that captures an orthogonal quality dimension — robustness, efficiency, simplicity, generalization, etc.
-- **If objectives disagree** (low or negative tau): look at what they disagree on and consider whether a synthesizing perspective could help. But don't just average them — that's what the consensus already does.
+- **If existing objectives are highly correlated** (tau > 0.7 between most pairs): propose something that captures a different balance of the same quality dimensions — e.g., weighting robustness more heavily than speed.
+- **If objectives disagree** (low or negative tau): look at what they disagree on. If two objectives are fighting, consider designing one that synthesizes both perspectives into a single balanced score.
 - **If the meta-agent gave specific directions**: follow them. The meta-agent has analyzed the full research trajectory and identified gaps.
 
 ## Common Patterns
 
 Good objectives often:
-- Focus on a single measurable aspect (don't try to capture everything)
+- Balance multiple quality dimensions in a single score (not just one aspect)
 - Use ratios or normalized metrics rather than raw values (more robust to scale)
 - Penalize pathological cases (infinite values, timeouts, NaN results)
 - Consider performance across multiple problem sizes if available in experiment_results

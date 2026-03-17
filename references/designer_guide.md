@@ -58,6 +58,14 @@ If the orchestrator's prompt includes a "Modifiable files" section, respect thos
 
 > **WARNING**: The orchestrator verifies via `git diff` that no protected files were modified after you finish. If violations are found, you will be asked to revert them. Repeated violations waste iteration time — do not modify protected files.
 
+**Experiment config**: If an `experiment_config.yaml` exists, you may modify it to change experiment parameters (loss type, dataset size, hyperparameters). The experiment script reads this file — you don't need to modify the script itself.
+
+**Hyperparameters**: If the project uses hyperparameter optimization, declare a `HYPER_SPACE` dict in your modified file with type, default, low, and high bounds for tunable parameters. The HPO module will optimize these automatically. Focus your modifications on architecture/algorithm changes.
+
+**Lessons learned**: Pay attention to the "Lessons Learned" section in your prompt — it contains constraints and patterns discovered during the search.
+
+**Multi-fidelity**: Your design will be evaluated at low fidelity first. Only top-performing designs advance to higher fidelity. Design for correctness at all scales.
+
 ## Your Process
 
 1. **Understand the direction**: Read the planner's guidance carefully

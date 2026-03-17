@@ -86,6 +86,18 @@ This is the most important setup step. You need to create a script that runs the
 
 4. **Handle errors gracefully**. If the modified code crashes, the script should catch the exception and either exit with non-zero status or output degraded metrics. Don't let one bad design break the entire loop.
 
+5. **Extract tunable constants into `experiment_config.yaml`** (recommended). Move parameters like loss type, dataset size, K values, etc. into a YAML config file that the experiment script loads at startup. Add `experiment_config.yaml` to the **Modifiable files** list and keep the experiment script itself protected. This lets the Designer change experiment parameters without modifying the protected script.
+
+6. **Support multi-fidelity** (optional). If experiments are expensive, have the script read `os.environ.get("MCGS_FIDELITY", "low")` and adjust its budget accordingly (e.g., fewer epochs/smaller problems at "low", full budget at "high"). This enables the multi-fidelity execution engine.
+
+7. **Declare HYPER_SPACE** (optional). If the project has tunable hyperparameters, add a `HYPER_SPACE` dict in the main source file. This enables automatic hyperparameter optimization. Example:
+   ```python
+   HYPER_SPACE = {
+       "learning_rate": dict(type="log_uniform", default=0.001, low=1e-5, high=0.1),
+       "momentum": dict(type="uniform", default=0.9, low=0.0, high=0.99),
+   }
+   ```
+
 **Example experiment script pattern (multi-objective):**
 ```python
 #!/usr/bin/env python3
@@ -304,12 +316,14 @@ You (the orchestrator) perform this analysis directly — no subagent needed. Re
 3. Check progress: are recent designs improving?
 4. Decide:
    - **Research phase**: exploring / converging / stuck / breakthrough_needed / refining
-   - **Weight adjustments**: for each objective, set a multiplier (0.0–2.0)
+   - **Weight multipliers**: for each objective, set a multiplier (0.0–2.0)
+   - **Weight adders**: for objectives suppressed by consensus but strategically important, set an adder (0.0–1.0) to guarantee influence despite low agreement
    - **Objective directions**: strategic guidance for the next Objective Agent invocation
 5. Update `graph.meta_state` with your analysis:
    - Save a snapshot to `graph.meta_state.history`
-   - Update `research_phase`, `research_assessment`, `objective_directions`, `weight_adjustments`
+   - Update `research_phase`, `research_assessment`, `objective_directions`, `weight_adjustments`, `weight_adders`
    - Apply weights: `graph.apply_meta_weights(weight_adjustments)`
+   - Apply adders: `graph.apply_meta_adders(weight_adders)`
 6. Save graph
 7. Recompute consensus with updated weights:
    ```bash
@@ -339,6 +353,9 @@ You are the Planner Agent in a Monte-Carlo Graph Search system.
 
 ## Node Table (ranked by UCB)
 {output of format_node_table()}
+
+## Lessons Learned
+{one line per entry from graph.lessons_learned, or "None yet." if empty}
 
 ## Available Commands
 You can run these bash commands to inspect nodes:
@@ -399,6 +416,9 @@ You are the Designer Agent in a Monte-Carlo Graph Search system.
 ## Protected Files (DO NOT MODIFY)
 {list of files that must not be changed — e.g., "run_experiment.py, mcgs_graph.json, test data"}
 
+## Lessons Learned
+{one line per entry from graph.lessons_learned, or "None yet." if empty}
+
 ## Planner's Direction
 {planner's research_direction}
 
@@ -420,89 +440,89 @@ After making your changes, create mcgs_design_output.json with your short_name, 
 Do NOT run the objective script — the execution engine handles evaluation.
 ```
 
-### Step 7: Validate, Commit, and Record
+### Steps 7–11: Validate, Commit, Execute, Score, UCB (Single Script)
 
-After the designer finishes:
+After the designer finishes, use `run_iteration.py` which handles all deterministic steps in one call.
 
-1. **Read** `mcgs_design_output.json` from the worktree.
-
-2. **Validate the design output:**
+**First, validate** (check for errors before committing):
 ```bash
-python {SKILL_DIR}/scripts/validate_agent_output.py validate-designer \
-    --file /tmp/mcgs-worktree-{new_id}/mcgs_design_output.json \
-    --reference-nodes {comma_separated_reference_node_ids}
-```
-
-3. **Check for protected file modifications:**
-```bash
-python {SKILL_DIR}/scripts/validate_agent_output.py check-protected \
+python {SKILL_DIR}/scripts/run_iteration.py validate \
     --worktree /tmp/mcgs-worktree-{new_id} \
+    --reference-nodes {comma_separated_reference_node_ids} \
+    --protected "{comma_separated_protected_files}" \
     --parent-branch mcgs/node-{parent_id} \
-    --protected "{comma_separated_protected_files}"
+    --graph {REPO_DIR}/mcgs_graph.json
 ```
 
-4. **If either check fails** → SendMessage to the Designer (1 retry max):
-   - For format errors: `"Fix mcgs_design_output.json — these errors were found: {errors}. Required format: {\"short_name\": \"...\", \"description\": \"...\", \"reference_weights\": [{\"node_id\": N, \"weight\": W}, ...]}"`
-   - For protected file violations: `"You modified protected files: {list}. Revert them with: git checkout mcgs/node-{parent_id} -- {file} for each file."`
-   - After the Designer responds, re-run both validation checks
+This outputs JSON with `validation.valid`, `validation.design_errors`, and `validation.protected_violations`.
 
-5. **If still failing after 1 retry** → fallback:
-   - Format errors: orchestrator fills defaults — equal weights across reference nodes, `short_name` from first 40 chars of description or `"unnamed_design"`
-   - Protected file violations: orchestrator reverts directly:
-     ```bash
-     cd /tmp/mcgs-worktree-{new_id}
-     git checkout mcgs/node-{parent_id} -- {protected_file}
-     ```
+**If validation fails** → SendMessage to the Designer (1 retry max):
+- For format errors: `"Fix mcgs_design_output.json: {errors}"`
+- For protected file violations: `"Revert these protected files: {list}. Use: git checkout mcgs/node-{parent_id} -- {file}"`
+- After the Designer responds, re-run `validate`
+- If still failing: apply fallback (equal weights, revert protected files manually), then proceed
 
-6. **Commit** (only after validation passes or fallback applied):
+**If validation passes** (or after fallback), run the full pipeline:
 ```bash
-cd /tmp/mcgs-worktree-{new_id}
-git checkout -b mcgs/node-{new_id}
-git add -A
-git commit -m "MCGS node {new_id}: {short_name}"
-```
-
-7. **Record** — add the node to `mcgs_graph.json`:
-   - Load graph, call `graph.add_node(...)` with parent_edges from reference_weights
-   - Save graph
-
-8. **Clean up** the worktree:
-```bash
-git worktree remove /tmp/mcgs-worktree-{new_id} --force
-```
-
-### Step 8: Execute the Experiment
-
-```bash
-python {SKILL_DIR}/scripts/execute_node.py \
-    --node-id {new_id} \
+python {SKILL_DIR}/scripts/run_iteration.py run \
+    --worktree /tmp/mcgs-worktree-{new_id} \
+    --reference-nodes {comma_separated_reference_node_ids} \
+    --protected "{comma_separated_protected_files}" \
+    --parent-branch mcgs/node-{parent_id} \
     --graph {REPO_DIR}/mcgs_graph.json \
     --repo-dir {REPO_DIR} \
+    --parent-edges '{reference_weights_as_json_array}' \
     --timeout {TIMEOUT}
 ```
 
-### Step 9: Score with Objectives (Multi-Objective Only)
+This single command:
+1. Validates the design output and protected files
+2. Creates branch `mcgs/node-{new_id}`, commits, registers node in graph
+3. Removes the designer worktree (before execute, preventing "already checked out" errors)
+4. Executes the experiment
+5. Scores objectives (multi-objective mode)
+6. Computes consensus (multi-objective mode)
+7. Updates UCB scores
 
-In multi-objective mode, evaluate all active objectives on the new node:
+Output is a JSON summary with node status, objective value, and any errors.
+
+**If multi-fidelity is enabled**, after the pipeline completes, periodically run a promotion sweep to advance top designs to higher fidelity:
 ```bash
-python {SKILL_DIR}/scripts/run_objectives.py \
-    --node-id {new_id} \
-    --graph {REPO_DIR}/mcgs_graph.json
+python {SKILL_DIR}/scripts/multi_fidelity.py promote-sweep \
+    --graph {REPO_DIR}/mcgs_graph.json \
+    --repo-dir {REPO_DIR}
 ```
 
-### Step 10: Compute Consensus (Multi-Objective Only)
-
-Recompute consensus scores for all nodes:
+**Lessons learned**: After each iteration, if something notable happened (validation error, failure with instructive error, protected file violation), add a lesson:
 ```bash
-python {SKILL_DIR}/scripts/consensus.py \
-    --graph {REPO_DIR}/mcgs_graph.json
+python {SKILL_DIR}/scripts/graph_utils.py --action add-lesson \
+    --graph {REPO_DIR}/mcgs_graph.json \
+    --text "run_experiment.py is protected — modify experiment_config.yaml instead"
 ```
 
-### Step 11: Update UCB Scores
+### Step 11.5: Hyperparameter Optimization (Optional, Periodic)
 
+Every `hpo_interval` iterations (default: 10), or when the user requests it, run HPO on the best untuned design:
 ```bash
-python {SKILL_DIR}/scripts/compute_ucb.py --graph {REPO_DIR}/mcgs_graph.json
+python {SKILL_DIR}/scripts/hpo_tune.py \
+    --graph {REPO_DIR}/mcgs_graph.json \
+    --repo-dir {REPO_DIR} \
+    --auto \
+    --max-iter {HPO_MAX_ITER} \
+    --backend {HPO_BACKEND}
 ```
+
+Or target a specific node:
+```bash
+python {SKILL_DIR}/scripts/hpo_tune.py \
+    --graph {REPO_DIR}/mcgs_graph.json \
+    --node-id {node_id} \
+    --repo-dir {REPO_DIR} \
+    --max-iter 50 \
+    --register
+```
+
+HPO creates a new node with tuned hyperparameters (same architecture, better params). The Designer should focus on architecture/algorithm changes and leave hyperparameter tuning to HPO.
 
 ### Step 12: Report Progress
 
