@@ -56,7 +56,9 @@ Focus on **high-UCB nodes** as candidates for further development, but also look
 
 ## Your Output
 
-Respond with a JSON block:
+Respond with a JSON block containing all six required fields:
+
+> **REQUIRED FIELDS** — all fields below are mandatory. The orchestrator validates your JSON. If fields are missing or malformed, you will be asked to fix the output.
 
 ```json
 {

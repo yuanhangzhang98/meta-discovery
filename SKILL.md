@@ -278,11 +278,20 @@ Generate a new objective function. Output:
 ```
 
 After the subagent returns:
-1. Extract the Python code and JSON metadata
+1. Extract the Python code and JSON metadata from the subagent's response
 2. Save the objective file to `{objectives_dir}/objective_{next_id}.py`
-3. Validate: import the file and call `objective()` on a sample node's experiment_results
-4. If valid: add to `graph.objectives` via `graph.add_objective(...)` and save graph
-5. If invalid: log the failure and continue (don't block the loop)
+3. Validate using the validation script:
+   ```bash
+   python {SKILL_DIR}/scripts/validate_agent_output.py validate-objective \
+       --file {objectives_dir}/objective_{next_id}.py \
+       --sample-results '{JSON experiment_results from a recent evaluated node}' \
+       --metadata '{JSON metadata extracted from the subagent response}'
+   ```
+4. **If validation fails** → SendMessage to the Objective Agent (1 retry max):
+   - Include the specific errors: `"Your objective function has these errors: {errors}. Fix the code and output corrected Python and JSON metadata."`
+   - After the agent responds, extract the updated code, overwrite the file, and re-validate
+5. **If still invalid after retry** → delete the file, log the failure, and continue (don't block the loop)
+6. If valid: add to `graph.objectives` via `graph.add_objective(...)` and save graph
 
 ### Step 3: Meta-Agent Analysis (Multi-Objective, Periodic)
 
@@ -344,6 +353,21 @@ Parse the planner's JSON output to extract:
 - `research_direction` — what to try next
 - `focus_areas` / `avoid_areas`
 
+**Validate the planner output.** Save the planner's JSON to a temp file (or parse inline), then run:
+```bash
+python {SKILL_DIR}/scripts/validate_agent_output.py validate-planner \
+    --file /tmp/planner_output.json
+```
+
+If validation fails → **SendMessage** to the Planner agent (1 retry max):
+- Include the specific errors: `"Your output has these errors: {errors}. Output corrected JSON with all required fields: current_phase, key_insights, research_direction, reference_node_ids, focus_areas, avoid_areas."`
+- After the agent responds, re-validate the corrected output
+
+If still invalid after retry → **fallback**:
+- Missing `reference_node_ids`: use the top-UCB evaluated node
+- Missing `research_direction`: use `"Continue exploring from top-UCB node"`
+- Missing other fields: use empty lists / `"early_exploration"`
+
 ### Step 5: Prepare the Designer's Workspace
 
 The primary parent is `reference_node_ids[0]` — the node the designer will branch from.
@@ -396,22 +420,53 @@ After making your changes, create mcgs_design_output.json with your short_name, 
 Do NOT run the objective script — the execution engine handles evaluation.
 ```
 
-### Step 7: Commit and Record
+### Step 7: Validate, Commit, and Record
 
 After the designer finishes:
 
-1. Read `mcgs_design_output.json` from the worktree
-2. Create a new branch and commit:
+1. **Read** `mcgs_design_output.json` from the worktree.
+
+2. **Validate the design output:**
+```bash
+python {SKILL_DIR}/scripts/validate_agent_output.py validate-designer \
+    --file /tmp/mcgs-worktree-{new_id}/mcgs_design_output.json \
+    --reference-nodes {comma_separated_reference_node_ids}
+```
+
+3. **Check for protected file modifications:**
+```bash
+python {SKILL_DIR}/scripts/validate_agent_output.py check-protected \
+    --worktree /tmp/mcgs-worktree-{new_id} \
+    --parent-branch mcgs/node-{parent_id} \
+    --protected "{comma_separated_protected_files}"
+```
+
+4. **If either check fails** → SendMessage to the Designer (1 retry max):
+   - For format errors: `"Fix mcgs_design_output.json — these errors were found: {errors}. Required format: {\"short_name\": \"...\", \"description\": \"...\", \"reference_weights\": [{\"node_id\": N, \"weight\": W}, ...]}"`
+   - For protected file violations: `"You modified protected files: {list}. Revert them with: git checkout mcgs/node-{parent_id} -- {file} for each file."`
+   - After the Designer responds, re-run both validation checks
+
+5. **If still failing after 1 retry** → fallback:
+   - Format errors: orchestrator fills defaults — equal weights across reference nodes, `short_name` from first 40 chars of description or `"unnamed_design"`
+   - Protected file violations: orchestrator reverts directly:
+     ```bash
+     cd /tmp/mcgs-worktree-{new_id}
+     git checkout mcgs/node-{parent_id} -- {protected_file}
+     ```
+
+6. **Commit** (only after validation passes or fallback applied):
 ```bash
 cd /tmp/mcgs-worktree-{new_id}
 git checkout -b mcgs/node-{new_id}
 git add -A
 git commit -m "MCGS node {new_id}: {short_name}"
 ```
-3. Add the node to `mcgs_graph.json`:
+
+7. **Record** — add the node to `mcgs_graph.json`:
    - Load graph, call `graph.add_node(...)` with parent_edges from reference_weights
    - Save graph
-4. Clean up the worktree:
+
+8. **Clean up** the worktree:
 ```bash
 git worktree remove /tmp/mcgs-worktree-{new_id} --force
 ```

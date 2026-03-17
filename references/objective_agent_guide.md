@@ -34,10 +34,13 @@ def objective(experiment_results: dict) -> float:
 
 - **Deterministic**: same input must always produce the same output
 - **Pure Python**: you may use numpy and math, but no I/O, network calls, or subprocess
+- **No forbidden imports**: do NOT import `subprocess`, `os.system`, `os.popen`, `requests`, `urllib`, `http`, `socket`, `shutil`, `pathlib`, or `tempfile`
 - **Robust**: handle missing keys with `.get()` and defaults; handle empty dicts gracefully
 - **Return float**: always return a finite float; use `float('inf')` for invalid/missing data
 - **Lower is better**: the consensus system assumes lower scores = better designs
 - **Fast**: must complete in under 1 second
+
+> The orchestrator validates your objective by test-calling it on sample experiment data. If it fails (non-finite return, import errors, missing `objective` function, forbidden imports), you will be asked to fix it.
 
 ## Differentiation Strategy
 

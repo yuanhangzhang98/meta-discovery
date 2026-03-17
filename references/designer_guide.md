@@ -56,6 +56,8 @@ The orchestrator may specify which files you should focus on and which you must 
 
 If the orchestrator's prompt includes a "Modifiable files" section, respect those boundaries strictly.
 
+> **WARNING**: The orchestrator verifies via `git diff` that no protected files were modified after you finish. If violations are found, you will be asked to revert them. Repeated violations waste iteration time — do not modify protected files.
+
 ## Your Process
 
 1. **Understand the direction**: Read the planner's guidance carefully
@@ -67,7 +69,9 @@ If the orchestrator's prompt includes a "Modifiable files" section, respect thos
 
 ## Your Output
 
-After making your code changes, create a file called `mcgs_design_output.json` in the working directory with:
+After making your code changes, create a file called `mcgs_design_output.json` in the working directory.
+
+> **REQUIRED FIELDS** — all three fields below are mandatory. The orchestrator validates this file automatically. If errors are found, you will be asked to fix them.
 
 ```json
 {
@@ -81,8 +85,10 @@ After making your code changes, create a file called `mcgs_design_output.json` i
 ```
 
 ### Reference Weights
+- Use ONLY the array-of-objects format shown above: `[{"node_id": <int>, "weight": <float>}, ...]`
+- Do NOT use dict format like `{"3": 0.7, "7": 0.3}` — this will fail validation
 - Include ALL reference node IDs from the planner's list
-- Assign weights (0.0-1.0) reflecting how much each reference influenced YOUR changes
+- Assign weights (0.0–1.0) reflecting how much each reference influenced YOUR changes
 - Weights MUST sum to 1.0
 - If you barely used a reference, give it a low weight (e.g., 0.05)
 - If one reference was dominant, give it a high weight (e.g., 0.8)
