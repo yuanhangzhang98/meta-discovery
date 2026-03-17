@@ -41,9 +41,19 @@ Supports two modes: **single-objective** (one evaluation script outputs a float)
 ## Requirements
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
-- Python 3.8+
+- Python 3.10+
 - Git
-- NumPy, SciPy (for consensus aggregation)
+
+**Optional but recommended:**
+```bash
+pip install -r requirements.txt
+```
+
+| Package | Purpose | Required? |
+|---------|---------|-----------|
+| `scipy` | Kendall tau in consensus aggregation | Optional (pure-Python fallback exists) |
+| `optuna` | Hyperparameter optimization (default backend) | Only if using HPO |
+| `HEBO` | Alternative HPO backend | Optional (requires Python ≤3.10, numpy <1.25) |
 
 ## License
 

@@ -1,0 +1,22 @@
+# Meta-Discovery: requirements
+# Core scripts use only the Python standard library.
+# The packages below are optional but recommended.
+
+# Consensus aggregation (optional but recommended — improves Kendall tau accuracy)
+# A pure-Python fallback is used if scipy is not installed.
+scipy>=1.10.0
+
+# Hyperparameter optimization — default backend
+# Required only if using hpo_tune.py
+optuna>=3.0.0
+
+# --- Optional: HEBO backend for HPO ---
+# HEBO has strict version requirements. Only install if your environment supports it.
+# Requires: Python <=3.10, numpy <1.25
+# Uncomment the lines below to use HEBO instead of Optuna:
+# HEBO==0.3.6
+# numpy>=1.24.0,<1.25
+# pandas>=1.5.0
+# pymoo==0.6.0
+# gpytorch>=1.14.0
+# torch>=2.0.0
