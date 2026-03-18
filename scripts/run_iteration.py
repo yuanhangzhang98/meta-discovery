@@ -50,12 +50,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 from graph_utils import _run_git, load_graph, save_graph, cleanup_stale_worktrees
 
 
-def _run_script(script_name: str, args: List[str], cwd: str | Path = ".") -> Dict[str, Any]:
+def _run_script(
+    script_name: str,
+    args: List[str],
+    cwd: str | Path = ".",
+    timeout: int = 600,
+) -> Dict[str, Any]:
     """Run a Python script from the scripts directory and return parsed output."""
     scripts_dir = Path(__file__).parent
     cmd = [sys.executable, str(scripts_dir / script_name)] + args
 
-    result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"Script {script_name} timed out after {timeout}s",
+        }
 
     return {
         "returncode": result.returncode,
@@ -174,13 +186,16 @@ def execute_step(
     graph = load_graph(graph_path)
     results: Dict[str, Any] = {}
 
+    # Experiment timeout needs generous subprocess timeout (experiment + overhead)
+    script_timeout = timeout + 60  # experiment timeout + 60s overhead for worktree setup/teardown
+
     # Execute experiment
     exec_result = _run_script("execute_node.py", [
         "--node-id", str(node_id),
         "--graph", graph_path,
         "--repo-dir", repo_dir,
         "--timeout", str(timeout),
-    ], cwd=repo_dir)
+    ], cwd=repo_dir, timeout=script_timeout)
     results["execute"] = {
         "returncode": exec_result["returncode"],
         "output": exec_result["stdout"][-500:],
@@ -200,19 +215,19 @@ def execute_step(
         score_result = _run_script("run_objectives.py", [
             "--node-id", str(node_id),
             "--graph", graph_path,
-        ], cwd=repo_dir)
+        ], cwd=repo_dir, timeout=120)
         results["score_objectives"] = score_result["stdout"][-300:]
 
         # Compute consensus
         consensus_result = _run_script("consensus.py", [
             "--graph", graph_path,
-        ], cwd=repo_dir)
+        ], cwd=repo_dir, timeout=120)
         results["consensus"] = consensus_result["stdout"][-300:]
 
     # Update UCB scores
     ucb_result = _run_script("compute_ucb.py", [
         "--graph", graph_path,
-    ], cwd=repo_dir)
+    ], cwd=repo_dir, timeout=60)
     results["ucb"] = ucb_result["stdout"][-200:]
 
     # Get final node state

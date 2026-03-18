@@ -3,7 +3,8 @@
 This document provides a comprehensive reference for the Meta-Discovery skill — an automated research system built as a Claude Code skill. It covers the system architecture, workflow, data model, all scripts, agent guides, and configuration options.
 
 For the mathematical foundations, see [`references/mcgs_algorithm.md`](references/mcgs_algorithm.md).
-For the orchestration instructions, see [`SKILL.md`](SKILL.md).
+For the orchestration instructions, see [`SKILL.md`](SKILL.md) (slim router) and [`phases/`](phases/) (phase-specific instructions).
+For the lightweight project index, see [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
@@ -191,6 +192,12 @@ All state is stored in `mcgs_graph.json`. The schema is defined in `scripts/grap
 
 ## 4. Workflow: The MCGS Loop
 
+The orchestration instructions are split into phase files loaded on-demand to save context:
+- `phases/setup.md` — Phase 1 (read once during setup)
+- `phases/loop.md` — Phase 2 (read during iteration loop)
+- `phases/summary.md` — Phase 3 (read at the end)
+- `phases/notes.md` — reference notes (read once during setup)
+
 ### Phase 1: Setup (one-time)
 
 1. **Understand the project**: read code, identify metrics, find key source files
@@ -330,7 +337,7 @@ python consensus.py --graph mcgs_graph.json --verbose
 - `agreement` = max(median Kendall tau with other objectives, 0) — suppresses outliers
 - `age_decay` = `age_decay_param ^ (current_iteration - created_iteration)` — phases out old objectives
 - `multiplier` = `objective.weight` (meta-agent, default 1.0)
-- `adder` = `objective.weight_adder` (meta-agent, default 0.0) — bypasses agreement-based zero
+- `adder` = `objective.weight_adder` (meta-agent, default 0.0) — bypasses agreement-based zero. **Use sparingly (0.01–0.05)**; agreement-based weights are typically 0.0–0.3 before normalization, so even small adders can dominate. An adder of 0.1 on a zero-agreement objective can give it >50% of total weight.
 
 ---
 
@@ -394,6 +401,8 @@ python run_iteration.py run \
 ```
 
 **Output**: JSON with `validation`, `commit` (node_id, branch), and `execution` (status, objective, ucb_score).
+
+**Timeouts**: The `--timeout` flag is propagated to `execute_node.py` with an additional 60s overhead for worktree setup/teardown. Scoring and consensus scripts get 120s; UCB gets 60s. If any subprocess times out, a clean error is returned instead of crashing.
 
 **Error handling**: If validation fails, exits with `action_needed: "fix_and_retry"`. The orchestrator can SendMessage to the Designer, then re-run.
 
@@ -699,33 +708,47 @@ HYPER_SPACE = {
 
 ```
 meta-discovery/
+├── CLAUDE.md                        # Lightweight project index (keep updated)
+├── DOCUMENTATION.md                 # This file (keep updated)
+├── SKILL.md                         # Skill entry point (slim router → phases/)
+├── README.md                        # Project overview, installation, citation
+├── requirements.txt                 # Python dependencies (all optional)
 ├── LICENSE                          # MIT License
-├── README.md                        # Project overview and citation
-├── DOCUMENTATION.md                 # This file
-├── SKILL.md                         # Orchestration instructions (Claude reads this)
 │
-├── references/                      # Agent prompt guides
+├── phases/                          # Orchestration instructions (loaded on-demand)
+│   ├── setup.md                     # Phase 1: project understanding, experiment script, init
+│   ├── loop.md                      # Phase 2: the MCGS iteration loop (Steps 1–13)
+│   ├── summary.md                   # Phase 3: report results, offer to apply best design
+│   └── notes.md                     # Reference notes on subagents, git, errors, convergence
+│
+├── references/                      # Agent prompt guides (injected into subagent prompts)
 │   ├── mcgs_algorithm.md            # Mathematical foundations
 │   ├── planner_guide.md             # Planner agent instructions
 │   ├── designer_guide.md            # Designer agent instructions
 │   ├── objective_agent_guide.md     # Objective agent instructions
 │   └── meta_agent_guide.md          # Meta-agent analysis framework
 │
-└── scripts/                         # Deterministic Python helpers
-    ├── graph_utils.py               # Data structures, JSON I/O, git operations
+└── scripts/                         # Deterministic Python helpers (no LLM)
+    ├── graph_utils.py               # Data model, JSON I/O, git operations
     ├── init_mcgs.py                 # Initialize MCGS in a repository
-    ├── execute_node.py              # Run experiment on a node
+    ├── execute_node.py              # Run experiment on a node (fidelity-aware)
     ├── run_objectives.py            # Score node with all objectives
     ├── consensus.py                 # Multi-objective consensus aggregation
     ├── compute_ucb.py               # UCB score computation
-    ├── register_node.py             # Register new node in graph
-    ├── run_iteration.py             # Full post-designer pipeline
-    ├── validate_agent_output.py     # Subagent output validation
-    ├── multi_fidelity.py            # Multi-fidelity execution engine
-    └── hpo_tune.py                  # Hyperparameter optimization
+    ├── register_node.py             # Register new node in graph (CLI)
+    ├── run_iteration.py             # Post-designer pipeline (validate → commit → execute → score → UCB)
+    ├── validate_agent_output.py     # Subagent output validation + protected file check
+    ├── multi_fidelity.py            # Multi-fidelity execution engine (tier promotion)
+    └── hpo_tune.py                  # Hyperparameter optimization (Optuna/HEBO)
 ```
 
 **Runtime artifacts** (created in user's project directory):
 - `mcgs_graph.json` — search state (the single source of truth)
 - `mcgs_objectives/` — generated objective .py files
 - `mcgs/node-*` — git branches for each design
+
+---
+
+## Maintenance
+
+**After modifying any file in this project, update both `CLAUDE.md` and this file (`DOCUMENTATION.md`) to reflect the changes.** See `CLAUDE.md` for the lightweight index.

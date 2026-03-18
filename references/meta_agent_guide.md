@@ -39,11 +39,15 @@ For each active objective, you have two controls:
 - **< 1.0**: reduce influence (it's redundant or slightly misleading)
 - **0.0**: effectively disable (it's clearly harmful)
 
-**Weight adder** (0.0 to 1.0) — bypasses the agreement-based zero:
+**Weight adder** (0.0 to 0.1) — bypasses the agreement-based zero:
 - **0.0** (default): no override; the consensus mechanism decides
-- **> 0.0**: guarantees this objective gets at least this much influence, even if negatively correlated with others. Use this to rescue objectives that the consensus suppresses but that you believe capture a genuinely important quality dimension.
+- **> 0.0**: guarantees this objective gets influence even if negatively correlated with others. Use this to rescue objectives that the consensus suppresses but that you believe capture a genuinely important quality dimension.
 
-The formula is: `weight = agreement × age_decay × multiplier + adder`
+The formula is: `weight = agreement × age_decay × multiplier + adder` (then normalized to sum to 1.0)
+
+> **CAUTION on adder magnitude**: Agreement-based weights are typically in the range 0.0–0.3 before normalization. Even a small adder like 0.1 can dominate when agreement-based weights are near zero, completely reshuffling rankings. **Start with adder = 0.01–0.05** and observe the effect before increasing. An adder of 0.1 is already very aggressive.
+>
+> **Guideline**: If N objectives have agreement-based weights averaging ~0.2, an adder of 0.05 on one objective gives it roughly 0.05/(N×0.2 + 0.05) ≈ 5–10% of total weight. That's usually enough to give it meaningful influence without dominating.
 
 Be conservative. Only adjust weights when you see clear evidence. The consensus mechanism handles most cases through its agreement-based weighting. Use the adder only when you have strong strategic reasons to override the consensus.
 
