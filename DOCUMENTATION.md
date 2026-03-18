@@ -233,6 +233,7 @@ Step 13: Continue or stop
 - Best design, improvement over baseline, full diff
 - Objective evolution, consensus stability (multi-obj)
 - Offer to apply best design to working code
+- **Research report generation**: `generate_report.py` creates publication-quality figures and a LaTeX scaffold; the agent fills in narrative sections to produce a standalone academic paper
 
 ---
 
@@ -491,6 +492,45 @@ python hpo_tune.py --graph mcgs_graph.json --auto --backend hebo
 
 ---
 
+### 5.12 Report Generation Scripts
+
+Five scripts for generating a LaTeX research report with publication-quality figures.
+
+**`plot_style.py`** — Shared matplotlib configuration (headless-safe `Agg` backend, 300 DPI, Arial/Helvetica). All plot scripts import `setup_style()` and `save_figure()`.
+
+**`plot_convergence.py`** — Two figures:
+- `convergence.pdf`: Best-so-far objective vs node creation order
+- `node_comparison.pdf`: Horizontal bar chart of top-N nodes by objective
+
+```bash
+python plot_convergence.py --graph mcgs_graph.json --output-dir figures/ --top-n 20
+```
+
+**`plot_dag.py`** — Design genealogy DAG visualization. Default: graphviz `dot` layout (requires pygraphviz or pydot). Fallback: pure-Python sugiyama layout. All nodes shown (no pruning). Nodes sized by objective quality, colored by objective/status/ID. Best node: red diamond. Baseline: gray circle.
+
+```bash
+python plot_dag.py --graph mcgs_graph.json --output-dir figures/ --color-by objective
+```
+
+**`plot_objectives.py`** — Combined multi-panel figure (multi-objective mode only):
+- Panel (a): Kendall tau heatmap
+- Panel (b): Objective weights bar chart
+- Panel (c): PCA embedding (requires scikit-learn, ≥3 objectives)
+
+```bash
+python plot_objectives.py --graph mcgs_graph.json --objectives-dir mcgs_objectives/ --output-dir figures/
+```
+
+**`generate_report.py`** — Preparation step: generates all standard figures and writes `data_summary.json` with extracted statistics (best node, improvement, top designs, lessons learned, config). The agent then writes the LaTeX report from scratch with full control over structure and narrative. Helper functions (`escape_latex`, `build_lineage`, `compile_pdf`) are importable.
+
+```bash
+python generate_report.py --graph mcgs_graph.json --output-dir mcgs_report/ [--objectives-dir mcgs_objectives/]
+```
+
+Output: `mcgs_report/figures/*.{png,pdf}` + `mcgs_report/data_summary.json`. The agent writes the `.tex` file and compiles it.
+
+---
+
 ## 6. Agent Guides Reference
 
 Located in `references/`. These are injected into subagent prompts by the orchestrator.
@@ -739,13 +779,19 @@ meta-discovery/
     ├── run_iteration.py             # Post-designer pipeline (validate → commit → execute → score → UCB)
     ├── validate_agent_output.py     # Subagent output validation + protected file check
     ├── multi_fidelity.py            # Multi-fidelity execution engine (tier promotion)
-    └── hpo_tune.py                  # Hyperparameter optimization (Optuna/HEBO)
+    ├── hpo_tune.py                  # Hyperparameter optimization (Optuna/HEBO)
+    ├── plot_style.py                # Shared matplotlib style (headless Agg backend, 300 DPI)
+    ├── plot_convergence.py          # Convergence curve + node comparison bar chart
+    ├── plot_dag.py                  # DAG visualization (graphviz default, sugiyama fallback)
+    ├── plot_objectives.py           # Combined objective analysis figure (multi-obj only)
+    └── generate_report.py           # LaTeX report scaffold + figure orchestrator
 ```
 
 **Runtime artifacts** (created in user's project directory):
 - `mcgs_graph.json` — search state (the single source of truth)
 - `mcgs_objectives/` — generated objective .py files
 - `mcgs/node-*` — git branches for each design
+- `mcgs_report/` — generated LaTeX report, figures, and compiled PDF
 
 ---
 

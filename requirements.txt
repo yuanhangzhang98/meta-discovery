@@ -10,6 +10,15 @@ scipy>=1.10.0
 # Required only if using hpo_tune.py
 optuna>=3.0.0
 
+# Report generation — visualization
+# Required only if using generate_report.py / plot_*.py
+matplotlib>=3.6.0
+networkx>=3.0
+numpy>=1.24.0
+
+# Objective embedding PCA (optional — embedding panel skipped if not installed)
+# scikit-learn>=1.2.0
+
 # --- Optional: HEBO backend for HPO ---
 # HEBO has strict version requirements. Only install if your environment supports it.
 # Requires: Python <=3.10, numpy <1.25
