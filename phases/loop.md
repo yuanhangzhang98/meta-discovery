@@ -137,7 +137,9 @@ python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.js
 
 ### `run_command` (prepare_worktree, post_designer_pipeline, hpo, multi_fidelity)
 
-Execute the command shown in `instruction.command`. For `post_designer_pipeline`:
+Execute the command shown in `instruction.command`. For long-running commands like `hpo`, you may run them in the background. HPO writes real-time progress to `{REPO_DIR}/hpo_progress.log` — tail this file to monitor progress while it runs.
+
+For `post_designer_pipeline`:
 
 1. Read `mcgs_design_output.json` from the worktree to get `reference_weights`
 2. Replace `{parent_edges}` in the command with the reference_weights JSON

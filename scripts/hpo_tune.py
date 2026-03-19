@@ -36,6 +36,22 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Force line-buffered stdout so progress is visible in real time when run as a
+# subprocess (Python defaults to full buffering when stdout is not a TTY).
+if not sys.stdout.line_buffering:
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+
+# Progress log file handle — set by tune_node() so background runs can be tailed.
+_hpo_log_fh = None
+
+
+def _hpo_log(msg: str) -> None:
+    """Print *msg* to stdout and append to the progress log file (if open)."""
+    print(msg)
+    if _hpo_log_fh is not None:
+        _hpo_log_fh.write(msg + "\n")
+        _hpo_log_fh.flush()
+
 sys.path.insert(0, str(Path(__file__).parent))
 from graph_utils import (
     ParentEdge, load_graph, save_graph,
@@ -381,10 +397,15 @@ def tune_node(
     Returns:
         Summary dict with best_params, best_metric, history, hyper_space_path.
     """
+    global _hpo_log_fh
     graph = load_graph(graph_path)
     node = graph.get_node(node_id)
     if node is None:
         return {"error": f"Node {node_id} not found"}
+
+    # Open progress log next to the graph file so callers can tail it.
+    log_path = Path(graph_path).parent / "hpo_progress.log"
+    _hpo_log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
 
     # Determine experiment script
     multi_obj = graph.config.multi_objective
@@ -408,8 +429,8 @@ def tune_node(
             return {"error": "HYPER_SPACE is empty"}
 
         hs_rel_path = str(hs_file.relative_to(worktree_dir))
-        print(f"[HPO] Found HYPER_SPACE in {hs_rel_path} with {len(hyper_space)} params")
-        print(f"[HPO] Params: {list(hyper_space.keys())}")
+        _hpo_log(f"[HPO] Found HYPER_SPACE in {hs_rel_path} with {len(hyper_space)} params")
+        _hpo_log(f"[HPO] Params: {list(hyper_space.keys())}")
 
         # Get parent's metric as baseline
         parent_metric = None
@@ -424,7 +445,7 @@ def tune_node(
         if parent_metric is not None:
             defaults = get_defaults(hyper_space)
             backend.warm_start(study, defaults, parent_metric)
-            print(f"[HPO] Warm-started with parent metric: {parent_metric:.4f}")
+            _hpo_log(f"[HPO] Warm-started with parent metric: {parent_metric:.4f}")
 
         # Optimization loop
         best_metric = float("inf") if graph.config.minimize else float("-inf")
@@ -443,9 +464,9 @@ def tune_node(
 
             if metric is None:
                 metric = float("inf") if graph.config.minimize else float("-inf")
-                print(f"  Iter {iteration + 1}/{max_iter}: FAILED")
+                _hpo_log(f"  Iter {iteration + 1}/{max_iter}: FAILED")
             else:
-                print(f"  Iter {iteration + 1}/{max_iter}: metric={metric:.6f} params={params}")
+                _hpo_log(f"  Iter {iteration + 1}/{max_iter}: metric={metric:.6f} params={params}")
 
             backend.observe(study, params, metric)
             history.append({"iteration": iteration, "params": params, "metric": metric})
@@ -454,7 +475,7 @@ def tune_node(
             if is_better:
                 best_metric = metric
                 best_params = dict(params)
-                print(f"  New best! metric={best_metric:.6f}")
+                _hpo_log(f"  New best! metric={best_metric:.6f}")
 
         # Restore original source code
         hs_file.write_text(source_code, encoding="utf-8")
@@ -471,6 +492,10 @@ def tune_node(
         }
 
     finally:
+        # Close progress log
+        if _hpo_log_fh is not None:
+            _hpo_log_fh.close()
+            _hpo_log_fh = None
         # Clean up worktree
         try:
             _run_git(["worktree", "remove", str(worktree_dir), "--force"], cwd=repo_dir_path, check=False)
@@ -564,7 +589,7 @@ def maybe_run_tuning(
     total = len(graph.nodes)
     tuned = sum(1 for n in graph.nodes if n.is_hpo_tuned)
     if total > 0 and tuned / total >= graph.config.hpo_max_ratio:
-        print(f"[HPO] Skipping: {tuned}/{total} nodes are tuned (max ratio {graph.config.hpo_max_ratio})")
+        _hpo_log(f"[HPO] Skipping: {tuned}/{total} nodes are tuned (max ratio {graph.config.hpo_max_ratio})")
         return None
 
     # Find best untuned evaluated node
@@ -581,7 +606,7 @@ def maybe_run_tuning(
     else:
         best = max(evaluated, key=lambda n: n.objective)
 
-    print(f"[HPO] Tuning node {best.id} ({best.short_name}, objective={best.objective:.4f})")
+    _hpo_log(f"[HPO] Tuning node {best.id} ({best.short_name}, objective={best.objective:.4f})")
 
     result = tune_node(
         graph_path=graph_path,
@@ -593,7 +618,7 @@ def maybe_run_tuning(
     )
 
     if "error" in result:
-        print(f"[HPO] Failed: {result['error']}")
+        _hpo_log(f"[HPO] Failed: {result['error']}")
         return None
 
     if not result.get("best_params"):
@@ -613,7 +638,7 @@ def maybe_run_tuning(
         delta = result["best_metric"] - result["parent_metric"]
         improvement = f" (delta={delta:+.4f})"
 
-    print(f"[HPO] Created tuned node {new_id}{improvement}")
+    _hpo_log(f"[HPO] Created tuned node {new_id}{improvement}")
     return new_id
 
 
