@@ -164,6 +164,11 @@ class HPOBackend(abc.ABC):
     def observe(self, study: Any, params: Dict[str, Any], metric: float) -> None:
         ...
 
+    def warm_start(self, study: Any, params: Dict[str, Any], metric: float) -> None:
+        """Seed the optimizer with a known (params, metric) pair."""
+        self.suggest(study)
+        self.observe(study, params, metric)
+
 
 class OptunaBackend(HPOBackend):
     """Optuna-based HPO backend using TPE sampler."""
@@ -212,6 +217,12 @@ class OptunaBackend(HPOBackend):
 
     def observe(self, study: Any, params: Dict[str, Any], metric: float) -> None:
         trial = study._current_trial  # type: ignore[attr-defined]
+        study.tell(trial, metric)
+
+    def warm_start(self, study: Any, params: Dict[str, Any], metric: float) -> None:
+        """Seed Optuna with a known (params, metric) pair via enqueue_trial."""
+        study.enqueue_trial(params)
+        trial = study.ask()
         study.tell(trial, metric)
 
 
@@ -267,6 +278,15 @@ class HEBOBackend(HPOBackend):
         suggestion_df = study["_last_suggestion"]
         objective = np.array([[metric]])
         optimizer.observe(suggestion_df, objective)
+
+    def warm_start(self, study: Any, params: Dict[str, Any], metric: float) -> None:
+        """Seed HEBO with a known (params, metric) pair directly."""
+        import numpy as np
+        import pandas as pd
+        optimizer = study["optimizer"]
+        df = pd.DataFrame([params])
+        objective = np.array([[metric]])
+        optimizer.observe(df, objective)
 
 
 def get_backend(name: str) -> HPOBackend:
@@ -403,7 +423,7 @@ def tune_node(
         # Warm-start with default params
         if parent_metric is not None:
             defaults = get_defaults(hyper_space)
-            backend.observe(study, defaults, parent_metric)
+            backend.warm_start(study, defaults, parent_metric)
             print(f"[HPO] Warm-started with parent metric: {parent_metric:.4f}")
 
         # Optimization loop
