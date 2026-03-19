@@ -69,8 +69,9 @@ scripts/
 ├── consensus.py            # Multi-objective consensus aggregation
 ├── compute_ucb.py          # UCB score computation
 ├── register_node.py        # Register a new node in the graph
+├── run_step.py             # Iteration state machine (next/complete)
 ├── run_iteration.py        # Full post-designer pipeline (Steps 7-11)
-├── validate_agent_output.py # Validate subagent outputs
+├── validate_agent_output.py # Validate subagent outputs (auto-fixes reference_weights)
 ├── multi_fidelity.py       # Multi-fidelity execution engine
 └── hpo_tune.py             # Hyperparameter optimization
 ```
@@ -304,9 +305,11 @@ python execute_node.py \
 ```
 
 **Output parsing:**
-1. Tries JSON (last stdout line) → stores as `experiment_results`
-2. Falls back to float → stores as `objective`
+1. Tries JSON — single-line first, then scans backwards for multi-line `{...}` object. Handles `NaN`/`Infinity` by replacing with `null`. Stores as `experiment_results`
+2. Falls back to float (last stdout line) → stores as `objective`
 3. Neither → marks node as `"failed"`
+
+**Data isolation:** If `config.data_dirs` is set, the listed directories are symlinked from the repo root into each evaluation worktree before the script runs. This avoids the need for relative-path hacks in experiment scripts.
 
 ---
 
@@ -374,7 +377,42 @@ Outputs JSON with the new `node_id`. Increments `total_iterations` by default.
 
 ---
 
-### 5.8 `run_iteration.py` — Post-Designer Pipeline
+### 5.8 `run_step.py` — Iteration State Machine
+
+Drives the MCGS iteration loop. Instead of the orchestrator manually executing 13 steps per iteration, `run_step.py` tracks state and tells the orchestrator what to do next.
+
+**Get next action:**
+```bash
+python run_step.py next \
+    --graph mcgs_graph.json \
+    --skill-dir /path/to/meta-discovery \
+    --repo-dir .
+```
+
+Returns JSON with `action` (what to do), `step` (step name), `description`, and either `prompt_context` (for LLM tasks) or `command` (for deterministic tasks).
+
+**Complete a step:**
+```bash
+python run_step.py complete \
+    --graph mcgs_graph.json \
+    --step planner \
+    --result '{"research_direction": "...", "reference_node_ids": [3]}'
+```
+
+**Step sequence per iteration:**
+`start → [objective_agent] → [meta_analysis] → planner → prepare_worktree → designer → post_designer_pipeline → [hpo] → [multi_fidelity] → report → iteration_complete`
+
+Steps in brackets are conditional on periodic intervals configured in GraphConfig. The state machine skips them automatically when they're not due.
+
+**Key features:**
+- Periodic tasks are never forgotten — the state machine checks intervals automatically
+- Prompt context is assembled for each subagent (guide file + graph state + task-specific data)
+- State persists in `mcgs_graph.json` via `iteration_state` — survives crashes
+- Lightweight planner mode: skip the Planner subagent by passing a hand-crafted result to `complete`
+
+---
+
+### 5.9 `run_iteration.py` — Post-Designer Pipeline
 
 Replaces the manual Steps 7-11 sequence with a single script.
 
@@ -409,22 +447,22 @@ python run_iteration.py run \
 
 ---
 
-### 5.9 `validate_agent_output.py` — Subagent Validation
+### 5.10 `validate_agent_output.py` — Subagent Validation
 
-Detect-only validation (no auto-fix) for all three subagent types.
+Validation for all three subagent types, with auto-fix for common issues.
 
 | Subcommand | Checks |
 |------------|--------|
 | `validate-planner` | JSON parseable; `research_direction`, `reference_node_ids`, `current_phase`, `key_insights`, `focus_areas`, `avoid_areas` present and correctly typed |
-| `validate-designer` | `short_name` (≤40 chars), `description`, `reference_weights` (array-of-objects, weights sum to 1.0, all reference nodes covered) |
+| `validate-designer` | `short_name` (≤40 chars), `description`, `reference_weights` (array-of-objects, weights sum to 1.0). **Auto-fixes** missing reference nodes by adding them with weight 0 |
 | `validate-objective` | Python compiles; `objective()` function exists with 1 param; no forbidden imports; test-call returns finite float; metadata has `name` and `description` |
 | `check-protected` | `git diff --name-only` + untracked files matched against `fnmatch` patterns |
 
-All return JSON: `{"valid": bool, "errors": [...]}` or `{"violations": [...]}`.
+Planner/objective return JSON: `{"valid": bool, "errors": [...]}`. Designer returns: `{"valid": bool, "errors": [...], "warnings": [...], "data": {...}}` (the `data` field contains the auto-fixed design output). Protected check returns: `{"violations": [...]}`.
 
 ---
 
-### 5.10 `multi_fidelity.py` — Multi-Fidelity Engine
+### 5.11 `multi_fidelity.py` — Multi-Fidelity Engine
 
 Implements the paper's multi-fidelity evaluation strategy.
 
@@ -448,7 +486,7 @@ Implements the paper's multi-fidelity evaluation strategy.
 
 ---
 
-### 5.11 `hpo_tune.py` — Hyperparameter Optimization
+### 5.12 `hpo_tune.py` — Hyperparameter Optimization
 
 Tunes hyperparameters declared via `HYPER_SPACE` in source code. Supports pluggable backends.
 
@@ -492,7 +530,7 @@ python hpo_tune.py --graph mcgs_graph.json --auto --backend hebo
 
 ---
 
-### 5.12 Report Generation Scripts
+### 5.13 Report Generation Scripts
 
 Five scripts for generating a LaTeX research report with publication-quality figures.
 

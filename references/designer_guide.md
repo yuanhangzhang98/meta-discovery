@@ -60,6 +60,8 @@ If the orchestrator's prompt includes a "Modifiable files" section, respect thos
 
 **Experiment config**: If an `experiment_config.yaml` exists, you may modify it to change experiment parameters (loss type, dataset size, hyperparameters). The experiment script reads this file — you don't need to modify the script itself.
 
+**Parameter precedence**: When `experiment_config.yaml` exists, the experiment script typically loads it and uses its values as overrides over source-code defaults. The precedence order is: `experiment_config.yaml` > source-code defaults > `HYPER_SPACE` defaults. Before modifying a parameter, check whether it is controlled by the config file or by source code. Changing a default in the source code has no effect if that parameter is already set in `experiment_config.yaml`.
+
 **Hyperparameters**: If the project uses hyperparameter optimization, declare a `HYPER_SPACE` dict in your modified file with type, default, low, and high bounds for tunable parameters. The HPO module will optimize these automatically. Focus your modifications on architecture/algorithm changes.
 
 **Lessons learned**: Pay attention to the "Lessons Learned" section in your prompt — it contains constraints and patterns discovered during the search.

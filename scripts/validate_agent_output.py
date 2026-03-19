@@ -109,8 +109,11 @@ def validate_designer(data: dict, reference_node_ids: List[int]) -> Dict[str, An
         - description: exists, non-empty
         - reference_weights: array-of-objects [{node_id: int, weight: float}],
           covers all reference_node_ids, weights sum to 1.0 (±0.01)
+
+    Missing reference nodes are auto-fixed with weight 0 (warning, not error).
     """
     errors: List[str] = []
+    warnings: List[str] = []
 
     # short_name
     sn = data.get("short_name")
@@ -156,12 +159,15 @@ def validate_designer(data: dict, reference_node_ids: List[int]) -> Dict[str, An
             else:
                 total_weight += float(w)
 
-        # Check all reference nodes are covered
+        # Check all reference nodes are covered — auto-fix missing ones
         expected = set(reference_node_ids)
         missing = expected - found_ids
         if missing:
-            errors.append(
-                f"reference_weights missing node_ids: {sorted(missing)}"
+            # Auto-fix: add missing nodes with weight 0 (designer didn't use them)
+            for mid in sorted(missing):
+                rw.append({"node_id": mid, "weight": 0.0})
+            warnings.append(
+                f"Auto-fixed: added missing reference nodes {sorted(missing)} with weight 0"
             )
 
         # Check sum
@@ -172,7 +178,7 @@ def validate_designer(data: dict, reference_node_ids: List[int]) -> Dict[str, An
     else:
         errors.append("'reference_weights' must be an array of objects")
 
-    return {"valid": len(errors) == 0, "errors": errors}
+    return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings, "data": data}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

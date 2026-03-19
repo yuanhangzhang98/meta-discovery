@@ -70,6 +70,19 @@ This is the most important setup step. You need to create a script that runs the
    }
    ```
 
+8. **Data directories** (recommended). If your experiment needs data files that live outside the git-tracked source tree (e.g., `../data/`, `data/`, or large datasets you don't want duplicated in every evaluation worktree), configure `data_dirs` in `mcgs_graph.json`. These paths are relative to the repo root and will be automatically symlinked into each evaluation worktree:
+   ```json
+   "config": {
+       "data_dirs": ["data", "../shared_data"]
+   }
+   ```
+   On Windows, if symlinking fails (requires Developer Mode or admin), the directories are copied instead.
+
+9. **JSON output requirements**. The experiment script's JSON output is parsed from stdout. Key rules:
+   - The JSON object can be on a single line (preferred) or multi-line — both work
+   - Avoid printing other `{...}` content to stdout after the JSON (use stderr for logs)
+   - Python's `float('nan')` and `float('inf')` produce invalid JSON (`NaN`, `Infinity`). The parser sanitizes these to `null`, but it's better to handle them in your script (e.g., replace with a large penalty value)
+
 **Example experiment script pattern (multi-objective):**
 ```python
 #!/usr/bin/env python3

@@ -23,10 +23,13 @@ Read this once during Phase 1 setup. You do not need to re-read it during the lo
 
 ## On the Experiment/Objective Script
 - **Single-objective**: script MUST print a float as its last stdout line
-- **Multi-objective**: script MUST print valid JSON as its last stdout line
+- **Multi-objective**: script MUST print a JSON object to stdout (single-line or multi-line both work)
+- Avoid `NaN`/`Infinity` in JSON output — they're sanitized to `null` but it's better to handle them in the script
+- Avoid printing other `{...}` content to stdout after the JSON results (use stderr for logging)
 - Scripts should be deterministic (or at least low-variance)
 - Scripts should complete within the timeout
 - If evaluation is expensive, suggest the user start with a cheap proxy
+- If data lives outside the repo, configure `data_dirs` in the graph config — directories are symlinked into worktrees automatically
 
 ## On Judging Convergence
 - If the last 5+ iterations show no improvement over the best node, the search may have converged

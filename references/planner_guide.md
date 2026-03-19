@@ -92,3 +92,6 @@ The Designer will make ONE small, principled modification. Your direction should
 
 ### Lessons Learned
 Pay attention to the "Lessons Learned" section in your prompt — it contains constraints and patterns discovered during the search. For example, certain files may be protected, certain approaches may have consistently failed, or certain code patterns may cause execution errors. Factor these into your direction to avoid wasting iterations.
+
+### Parameter Precedence
+Some projects use `experiment_config.yaml` which overrides source-code defaults. When directing the Designer to change a parameter, specify whether to change it in the config file or in the source code. If the config file controls a parameter, the Designer should modify `experiment_config.yaml` rather than changing the source-code default (which would be silently overridden).

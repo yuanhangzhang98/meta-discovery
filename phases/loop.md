@@ -1,37 +1,54 @@
 # Phase 2: The MCGS Loop
 
-Repeat for each iteration (up to the user's requested count, or until they say stop):
+The iteration loop is driven by `run_step.py` — a state machine that tracks progress, triggers periodic tasks automatically, and tells you exactly what to do next. You no longer need to remember 13 steps or track iteration counts for periodic tasks.
 
-## Step 1: Load Current State
+## How the Loop Works
 
-Read `mcgs_graph.json` and run `compute_ucb.py` to ensure scores are current.
+Each iteration follows this dispatch loop:
 
-## Step 2: Objective Agent (Multi-Objective, Periodic)
+```
+while not done:
+    instruction = run_step.py next --graph {REPO_DIR}/mcgs_graph.json --skill-dir {SKILL_DIR} --repo-dir {REPO_DIR}
 
-**Skip this step** in single-objective mode or if `iteration % objective_interval != 0`.
+    match instruction.action:
+        "spawn_objective_agent"    → spawn subagent, then complete
+        "run_meta_analysis"        → you analyze directly, then complete
+        "spawn_planner"            → spawn subagent, then complete
+        "run_command"              → execute the command, then complete
+        "spawn_designer"           → spawn subagent, then complete
+        "report"                   → display summary to user, then complete
+        "iteration_complete"       → break — ask user to continue or stop
 
-When it's time to generate a new objective, spawn a **read-only subagent** for the Objective Agent:
+    run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step {step} --result '{result_json}'
+```
 
-**Subagent prompt template:**
+The state machine handles:
+- **Periodic task scheduling**: objective generation, meta-analysis, HPO, and multi-fidelity promotion are triggered automatically when their interval matches
+- **Prompt context assembly**: each `spawn_*` action includes a `prompt_context` with the guide file, graph state, and all data the subagent needs
+- **State persistence**: progress survives crashes — `run_step.py next` resumes from the last completed step
+
+## Handling Each Action Type
+
+### `spawn_objective_agent`
+
+Spawn a **read-only subagent** using the prompt context provided:
+
 ```
 You are the Objective Agent in a Monte-Carlo Graph Search system.
 
-{contents of references/objective_agent_guide.md}
+{instruction.prompt_context.guide}
 
 ## Research Goal
-{research_goal from config}
+{instruction.prompt_context.research_goal}
 
 ## Existing Objectives
-{for each objective: name, description, code, current weight from format_objective_table()}
-
-## Kendall Tau Correlation Matrix
-{tau matrix from latest consensus.py run — read from graph stats or recompute}
+{instruction.prompt_context.existing_objectives}
 
 ## Example Experiment Results
-{experiment_results from 2-3 recent evaluated nodes, formatted as JSON}
+{instruction.prompt_context.example_experiment_results}
 
 ## Meta-Agent Directions
-{graph.meta_state.objective_directions, if available, else "No specific guidance yet."}
+{instruction.prompt_context.meta_agent_directions}
 
 Generate a new objective function. Output:
 1. The Python code in a fenced ```python block
@@ -39,262 +56,170 @@ Generate a new objective function. Output:
 ```
 
 After the subagent returns:
-1. Extract the Python code and JSON metadata from the subagent's response
-2. Save the objective file to `{objectives_dir}/objective_{next_id}.py`
-3. Validate using the validation script:
+1. Extract the Python code and JSON metadata
+2. Save to `{objectives_dir}/objective_{next_id}.py`
+3. Validate:
    ```bash
    python {SKILL_DIR}/scripts/validate_agent_output.py validate-objective \
        --file {objectives_dir}/objective_{next_id}.py \
-       --sample-results '{JSON experiment_results from a recent evaluated node}' \
-       --metadata '{JSON metadata extracted from the subagent response}'
+       --sample-results '{instruction.prompt_context.sample_results_for_validation}'
    ```
-4. **If validation fails** → SendMessage to the Objective Agent (1 retry max):
-   - Include the specific errors: `"Your objective function has these errors: {errors}. Fix the code and output corrected Python and JSON metadata."`
-   - After the agent responds, extract the updated code, overwrite the file, and re-validate
-5. **If still invalid after retry** → delete the file, log the failure, and continue (don't block the loop)
-6. If valid: add to `graph.objectives` via `graph.add_objective(...)` and save graph
-
-## Step 3: Meta-Agent Analysis (Multi-Objective, Periodic)
-
-**Skip this step** in single-objective mode or if `iteration % meta_interval != 0`.
-
-You (the orchestrator) perform this analysis directly — no subagent needed. Read `references/meta_agent_guide.md` for the decision framework.
-
-1. Run `consensus.py --verbose` to get the latest correlation matrix and weights
-2. Review the tau matrix: which objectives agree? Which are outliers?
-3. Check progress: are recent designs improving?
-4. Decide:
-   - **Research phase**: exploring / converging / stuck / breakthrough_needed / refining
-   - **Weight multipliers**: for each objective, set a multiplier (0.0–2.0)
-   - **Weight adders**: for objectives suppressed by consensus but strategically important, set an adder (0.0–1.0) to guarantee influence despite low agreement
-   - **Objective directions**: strategic guidance for the next Objective Agent invocation
-5. Update `graph.meta_state` with your analysis:
-   - Save a snapshot to `graph.meta_state.history`
-   - Update `research_phase`, `research_assessment`, `objective_directions`, `weight_adjustments`, `weight_adders`
-   - Apply weights: `graph.apply_meta_weights(weight_adjustments)`
-   - Apply adders: `graph.apply_meta_adders(weight_adders)`
-6. Save graph
-7. Recompute consensus with updated weights:
+4. **If invalid** → SendMessage (1 retry max), then skip if still broken
+5. If valid: register via `graph.add_objective(...)` and save graph
+6. Complete the step:
    ```bash
-   python {SKILL_DIR}/scripts/consensus.py --graph {REPO_DIR}/mcgs_graph.json
-   python {SKILL_DIR}/scripts/compute_ucb.py --graph {REPO_DIR}/mcgs_graph.json
+   python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step objective_agent
    ```
 
-## Step 4: Run the Planner
+### `run_meta_analysis`
 
-Spawn a **read-only subagent** for the Planner role. Use the Agent tool with this structure:
+You (the orchestrator) perform this directly — no subagent. The instruction includes the guide and commands.
 
-**Subagent prompt template:**
+1. Run the consensus verbose command from `instruction.commands.consensus_verbose`
+2. Review tau matrix: which objectives agree? Which are outliers? Are weights collapsing?
+3. Decide: research_phase, weight_multipliers, weight_adders, objective_directions
+4. Update `graph.meta_state` (save snapshot to history, apply weights/adders)
+5. Recompute consensus and UCB using commands from `instruction.commands`
+6. Complete:
+   ```bash
+   python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step meta_analysis
+   ```
+
+### `spawn_planner`
+
+Spawn a **read-only subagent** using the prompt context:
+
 ```
 You are the Planner Agent in a Monte-Carlo Graph Search system.
 
-{contents of references/planner_guide.md}
+{instruction.prompt_context.guide}
 
 ## Research Goal
-{research_goal from config}
+{instruction.prompt_context.research_goal}
 
 ## Project Context
-{brief description: what the project does, key source files the Designer can modify,
- what kinds of changes are most promising — architecture, loss functions, algorithms, etc.}
+{your description of the project, key source files, promising change directions}
 
 ## Graph Summary
-{output of format_graph_summary()}
+{instruction.prompt_context.graph_summary}
 
 ## Node Table (ranked by UCB)
-{output of format_node_table()}
+{instruction.prompt_context.node_table}
 
 ## Lessons Learned
-{one line per entry from graph.lessons_learned, or "None yet." if empty}
+{instruction.prompt_context.lessons_learned}
 
 ## Available Commands
-You can run these bash commands to inspect nodes:
 - `git diff mcgs/node-X..mcgs/node-Y` — see code diff between two nodes
 - `git show mcgs/node-X:path/to/file` — read a file on a specific node's branch
 
 Analyze the search history and output your decision as a JSON block.
 ```
 
-Parse the planner's JSON output to extract:
-- `reference_node_ids` — which nodes to build from
-- `research_direction` — what to try next
-- `focus_areas` / `avoid_areas`
-
-**Validate the planner output.** Save the planner's JSON to a temp file (or parse inline), then run:
+Parse the planner's JSON output. Validate:
 ```bash
-python {SKILL_DIR}/scripts/validate_agent_output.py validate-planner \
-    --file /tmp/planner_output.json
+python {SKILL_DIR}/scripts/validate_agent_output.py validate-planner --file /tmp/planner_output.json
 ```
 
-If validation fails → **SendMessage** to the Planner agent (1 retry max):
-- Include the specific errors: `"Your output has these errors: {errors}. Output corrected JSON with all required fields: current_phase, key_insights, research_direction, reference_node_ids, focus_areas, avoid_areas."`
-- After the agent responds, re-validate the corrected output
+If invalid → SendMessage (1 retry), then fallback (top-UCB node, generic direction).
 
-If still invalid after retry → **fallback**:
-- Missing `reference_node_ids`: use the top-UCB evaluated node
-- Missing `research_direction`: use `"Continue exploring from top-UCB node"`
-- Missing other fields: use empty lists / `"early_exploration"`
-
-## Step 5: Prepare the Designer's Workspace
-
-The primary parent is `reference_node_ids[0]` — the node the designer will branch from.
-
-Create a git worktree:
+Complete with the planner's JSON as the result:
 ```bash
-git worktree add /tmp/mcgs-worktree-{new_id} mcgs/node-{parent_id}
+python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json \
+    --step planner --result '{planner_json}'
 ```
 
-## Step 6: Run the Designer
+**Lightweight mode**: When the strategy is clear (e.g., a parameter sweep), you can skip the Planner subagent entirely. Construct the planner output yourself and pass it directly to `complete`:
+```bash
+python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json \
+    --step planner --result '{"research_direction": "Try electrode=2500", "reference_node_ids": [5], "focus_areas": ["electrode parameter"], "avoid_areas": [], "current_phase": "systematic_search", "key_insights": ["Interpolating between 2000 and 3500"]}'
+```
 
-Spawn a **code-modifying subagent** for the Designer role:
+### `run_command` (prepare_worktree, post_designer_pipeline, hpo, multi_fidelity)
 
-**Subagent prompt template:**
+Execute the command shown in `instruction.command`. For `post_designer_pipeline`:
+
+1. Read `mcgs_design_output.json` from the worktree to get `reference_weights`
+2. Replace `{parent_edges}` in the command with the reference_weights JSON
+3. Run the command
+4. **If validation fails** → SendMessage to Designer (1 retry), then fallback
+
+Complete with the command's JSON output:
+```bash
+python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json \
+    --step post_designer_pipeline --result '{pipeline_json}'
+```
+
+### `spawn_designer`
+
+Spawn a **code-modifying subagent** using the prompt context:
+
 ```
 You are the Designer Agent in a Monte-Carlo Graph Search system.
 
-{contents of references/designer_guide.md}
+{instruction.prompt_context.guide}
 
 ## Research Goal
-{research_goal}
+{instruction.prompt_context.research_goal}
 
 ## Project Context
-{brief description of the project — what it does, key source files, how experiments are run}
-
-## Modifiable Files
-{list of files/directories the designer is allowed to change — e.g., "src/models.py, src/losses.py, src/training.py"}
+{your description of the project, modifiable files, protected files}
 
 ## Protected Files (DO NOT MODIFY)
-{list of files that must not be changed — e.g., "run_experiment.py, mcgs_graph.json, test data"}
+{experiment script, mcgs_graph.json, test data}
 
 ## Lessons Learned
-{one line per entry from graph.lessons_learned, or "None yet." if empty}
+{instruction.prompt_context.lessons_learned}
 
 ## Planner's Direction
-{planner's research_direction}
+{instruction.prompt_context.research_direction}
 
-## Reference Nodes: {reference_node_ids}
-Focus areas: {focus_areas}
-Avoid: {avoid_areas}
+## Reference Nodes: {instruction.prompt_context.reference_node_ids}
+Focus areas: {instruction.prompt_context.focus_areas}
+Avoid: {instruction.prompt_context.avoid_areas}
 
 ## Your Task
-Your working directory is /tmp/mcgs-worktree-{new_id}, checked out to node {parent_id}'s code.
+Working directory: {instruction.prompt_context.worktree}
+Parent node: {instruction.prompt_context.parent_node_id}
 
-Make ONE small, principled modification following the planner's direction.
-
-You can inspect reference nodes with:
-- `git diff mcgs/node-{parent_id}..mcgs/node-{ref_id}` to see what changed in a reference
-- `git show mcgs/node-{ref_id}:path/to/file` to read files from a reference node
-
-After making your changes, create mcgs_design_output.json with your short_name, description, and reference_weights.
-
-Do NOT run the objective script — the execution engine handles evaluation.
+Make ONE small, principled modification. Create mcgs_design_output.json when done.
+Do NOT run the objective script.
 ```
 
-## Steps 7–11: Validate, Commit, Execute, Score, UCB (Single Script)
-
-After the designer finishes, use `run_iteration.py` which handles all deterministic steps in one call.
-
-**First, validate** (check for errors before committing):
+Complete after the designer finishes:
 ```bash
-python {SKILL_DIR}/scripts/run_iteration.py validate \
-    --worktree /tmp/mcgs-worktree-{new_id} \
-    --reference-nodes {comma_separated_reference_node_ids} \
-    --protected "{comma_separated_protected_files}" \
-    --parent-branch mcgs/node-{parent_id} \
-    --graph {REPO_DIR}/mcgs_graph.json
+python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step designer
 ```
 
-This outputs JSON with `validation.valid`, `validation.design_errors`, and `validation.protected_violations`.
+### `report`
 
-**If validation fails** → SendMessage to the Designer (1 retry max):
-- For format errors: `"Fix mcgs_design_output.json: {errors}"`
-- For protected file violations: `"Revert these protected files: {list}. Use: git checkout mcgs/node-{parent_id} -- {file}"`
-- After the Designer responds, re-run `validate`
-- If still failing: apply fallback (equal weights, revert protected files manually), then proceed
+Display `instruction.summary` to the user:
+- Iteration number, new node ID/name/status
+- Objective value vs best-so-far
+- Periodic tasks that ran this iteration
 
-**If validation passes** (or after fallback), run the full pipeline:
-```bash
-python {SKILL_DIR}/scripts/run_iteration.py run \
-    --worktree /tmp/mcgs-worktree-{new_id} \
-    --reference-nodes {comma_separated_reference_node_ids} \
-    --protected "{comma_separated_protected_files}" \
-    --parent-branch mcgs/node-{parent_id} \
-    --graph {REPO_DIR}/mcgs_graph.json \
-    --repo-dir {REPO_DIR} \
-    --parent-edges '{reference_weights_as_json_array}' \
-    --timeout {TIMEOUT}
-```
-
-This single command:
-1. Validates the design output and protected files
-2. Creates branch `mcgs/node-{new_id}`, commits, registers node in graph
-3. Removes the designer worktree (before execute, preventing "already checked out" errors)
-4. Executes the experiment
-5. Scores objectives (multi-objective mode)
-6. Computes consensus (multi-objective mode)
-7. Updates UCB scores
-
-Output is a JSON summary with node status, objective value, and any errors.
-
-**If multi-fidelity is enabled**, after the pipeline completes, periodically run a promotion sweep to advance top designs to higher fidelity:
-```bash
-python {SKILL_DIR}/scripts/multi_fidelity.py promote-sweep \
-    --graph {REPO_DIR}/mcgs_graph.json \
-    --repo-dir {REPO_DIR}
-```
-
-**Lessons learned**: After each iteration, if something notable happened (validation error, failure with instructive error, protected file violation), add a lesson:
+If something notable happened, add a lesson:
 ```bash
 python {SKILL_DIR}/scripts/graph_utils.py --action add-lesson \
-    --graph {REPO_DIR}/mcgs_graph.json \
-    --text "run_experiment.py is protected — modify experiment_config.yaml instead"
+    --graph {REPO_DIR}/mcgs_graph.json --text "..."
 ```
 
-## Step 11.5: Hyperparameter Optimization (Optional, Periodic)
-
-Every `hpo_interval` iterations (default: 10), or when the user requests it, run HPO on the best untuned design:
+Complete:
 ```bash
-python {SKILL_DIR}/scripts/hpo_tune.py \
-    --graph {REPO_DIR}/mcgs_graph.json \
-    --repo-dir {REPO_DIR} \
-    --auto \
-    --max-iter {HPO_MAX_ITER} \
-    --backend {HPO_BACKEND}
+python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step report
 ```
 
-Or target a specific node:
+### `iteration_complete`
+
+One iteration is done. Ask the user:
+- **Continue?** → call `run_step.py next` again (it auto-starts a new iteration)
+- **Stop?** → proceed to Phase 3 — read `phases/summary.md`
+- **Converged?** If the last K iterations show no improvement, suggest stopping
+
+## Forcing a New Iteration
+
+To explicitly start a fresh iteration (e.g., after recovering from an error):
 ```bash
-python {SKILL_DIR}/scripts/hpo_tune.py \
-    --graph {REPO_DIR}/mcgs_graph.json \
-    --node-id {node_id} \
-    --repo-dir {REPO_DIR} \
-    --max-iter 50 \
-    --register
+python {SKILL_DIR}/scripts/run_step.py next --graph {REPO_DIR}/mcgs_graph.json \
+    --skill-dir {SKILL_DIR} --repo-dir {REPO_DIR} --new-iteration
 ```
-
-HPO creates a new node with tuned hyperparameters (same architecture, better params). The Designer should focus on architecture/algorithm changes and leave hyperparameter tuning to HPO.
-
-## Step 12: Report Progress
-
-After each iteration, tell the user:
-- **Iteration N/M**
-- **New node**: ID, name, description
-- **Objective**: value (and comparison to parent and best-so-far)
-- **Status**: improved / regressed / failed
-- **Best overall**: node ID, objective value
-
-In multi-objective mode, also report:
-- Per-objective scores for the new node
-- Consensus score
-- Any meta-agent analysis performed this iteration
-- Any new objectives generated this iteration
-
-If the new design improved on the best, celebrate briefly. If it regressed, note it as useful information for future iterations.
-
-## Step 13: Continue or Stop
-
-Continue the loop unless:
-- Reached max iterations
-- User says stop
-- You notice the search has converged (last K iterations show no improvement) — suggest stopping and summarize
-
-When done, proceed to Phase 3 — read `phases/summary.md`.

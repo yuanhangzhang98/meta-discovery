@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,87 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from graph_utils import load_graph, save_graph, _run_git
+
+# ── JSON sanitization ────────────────────────────────────────────────────────
+
+_JSON_SANITIZE = [
+    (re.compile(r'\bNaN\b'), 'null'),
+    (re.compile(r'-Infinity\b'), 'null'),
+    (re.compile(r'\bInfinity\b'), 'null'),
+]
+
+
+def _sanitize_json(text: str) -> str:
+    """Replace non-standard JSON tokens (NaN, Infinity) with null."""
+    for pattern, replacement in _JSON_SANITIZE:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _try_parse_json(text: str) -> dict | None:
+    """Try to parse text as a JSON dict, with NaN/Infinity sanitization."""
+    try:
+        parsed = json.loads(_sanitize_json(text))
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
+def _extract_json_from_stdout(stdout: str) -> dict | None:
+    """Extract a JSON object from stdout, handling multi-line output.
+
+    Tries the last line first (fast path), then scans backwards for a
+    complete JSON object delimited by matching braces.
+    """
+    lines = [l.strip() for l in stdout.strip().split("\n") if l.strip()]
+    if not lines:
+        return None
+
+    # Fast path: last line is complete JSON
+    result = _try_parse_json(lines[-1])
+    if result is not None:
+        return result
+
+    # Slow path: scan backwards for matching { ... }
+    full = stdout.rstrip()
+    last_brace = full.rfind("}")
+    if last_brace < 0:
+        return None
+
+    depth = 0
+    for i in range(last_brace, max(last_brace - 5000, -1), -1):
+        if full[i] == "}":
+            depth += 1
+        elif full[i] == "{":
+            depth -= 1
+        if depth == 0:
+            result = _try_parse_json(full[i:last_brace + 1])
+            if result is not None:
+                return result
+            break
+
+    return None
+
+
+def _symlink_data_dirs(data_dirs: list, repo_dir: Path, worktree_dir: Path) -> None:
+    """Symlink configured data directories into the worktree."""
+    for data_dir in data_dirs:
+        source = repo_dir / data_dir
+        target = worktree_dir / data_dir
+        if not source.exists():
+            print(f"  Warning: data_dir '{data_dir}' not found at {source}", file=sys.stderr)
+            continue
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(source), str(target), target_is_directory=source.is_dir())
+            print(f"  Symlinked {data_dir} -> {source}")
+        except OSError:
+            shutil.copytree(str(source), str(target))
+            print(f"  Copied {data_dir} (symlink failed)")
 
 
 def execute_node(
@@ -89,6 +171,10 @@ def execute_node(
         print(f"Creating worktree for {branch} at {worktree_dir}...")
         _run_git(["worktree", "add", str(worktree_dir), branch], cwd=repo_dir)
 
+        # Symlink data directories into worktree
+        if graph.config.data_dirs:
+            _symlink_data_dirs(graph.config.data_dirs, repo_dir, worktree_dir)
+
         # Check that the script exists
         script_path = worktree_dir / script_name
         if not script_path.exists():
@@ -122,35 +208,30 @@ def execute_node(
             save_graph(graph, graph_path)
             return None
 
-        # Parse output from last non-empty stdout line
-        stdout_lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
-        if not stdout_lines:
+        # Parse output — try JSON first (multi-objective), then float (single)
+        if not result.stdout.strip():
             print("Error: Script produced no output", file=sys.stderr)
             node.status = "failed"
             save_graph(graph, graph_path)
             return None
 
-        last_line = stdout_lines[-1]
-
-        # Try JSON first (multi-objective experiment results)
-        try:
-            experiment_results = json.loads(last_line)
-            if isinstance(experiment_results, dict):
-                # Store fidelity-specific results if applicable
-                if fidelity:
-                    node.fidelity_results[fidelity] = experiment_results
-                # Always set experiment_results to latest (highest-fidelity) results
-                node.experiment_results = experiment_results
-                node.status = "evaluated"
-                # In multi-objective mode, objective is set later by consensus.py
-                # In single-objective fallback, don't set objective here
-                save_graph(graph, graph_path)
-                print(f"Node {node_id} evaluated: experiment_results = {json.dumps(experiment_results)[:200]}")
-                return 0.0  # Placeholder; real score comes from consensus
-        except (json.JSONDecodeError, TypeError):
-            pass  # Not JSON, try float
+        # Try JSON (handles single-line, multi-line, and NaN/Infinity)
+        experiment_results = _extract_json_from_stdout(result.stdout)
+        if experiment_results is not None:
+            # Store fidelity-specific results if applicable
+            if fidelity:
+                node.fidelity_results[fidelity] = experiment_results
+            # Always set experiment_results to latest (highest-fidelity) results
+            node.experiment_results = experiment_results
+            node.status = "evaluated"
+            # In multi-objective mode, objective is set later by consensus.py
+            save_graph(graph, graph_path)
+            print(f"Node {node_id} evaluated: experiment_results = {json.dumps(experiment_results)[:200]}")
+            return 0.0  # Placeholder; real score comes from consensus
 
         # Fall back to float parsing (single-objective mode)
+        stdout_lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+        last_line = stdout_lines[-1] if stdout_lines else ""
         try:
             objective_value = float(last_line)
         except ValueError:

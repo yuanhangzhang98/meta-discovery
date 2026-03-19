@@ -96,6 +96,27 @@ class MetaState:
 
 
 @dataclass
+class IterationState:
+    """Tracks progress through the current MCGS iteration for run_step.py."""
+    iteration: int = 0                                    # current iteration number
+    step: str = "start"                                   # current step in the state machine
+    periodic_tasks: List[str] = field(default_factory=list)  # tasks due this iteration
+    planner_output: Optional[Dict[str, Any]] = None       # cached planner result
+    designer_worktree: str = ""                            # path to active worktree
+    parent_node_id: Optional[int] = None                  # primary parent for this iteration
+    reference_node_ids: List[int] = field(default_factory=list)
+    new_node_id: Optional[int] = None                     # node created this iteration
+    completed_steps: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "IterationState":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class GraphNode:
     """A single node (design) in the MCGS graph."""
     id: int
@@ -181,6 +202,8 @@ class GraphConfig:
     hpo_max_iter: int = 50               # max HPO iterations per run
     hpo_max_ratio: float = 0.1           # max ratio of tuned to total nodes
     hyper_space_file: str = ""            # path to file containing HYPER_SPACE (relative to repo root)
+    # Data isolation: paths (relative to repo root) symlinked into eval worktrees
+    data_dirs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -207,6 +230,8 @@ class MCGSGraph:
     meta_state: Optional[MetaState] = None
     # Accumulated lessons for subagent context
     lessons_learned: List[str] = field(default_factory=list)
+    # Iteration state machine (for run_step.py)
+    iteration_state: Optional[IterationState] = None
 
     # ── Serialization ────────────────────────────────────────────────────
 
@@ -223,6 +248,8 @@ class MCGSGraph:
             d["meta_state"] = self.meta_state.to_dict()
         if self.lessons_learned:
             d["lessons_learned"] = self.lessons_learned
+        if self.iteration_state is not None:
+            d["iteration_state"] = self.iteration_state.to_dict()
         return d
 
     @classmethod
@@ -231,6 +258,7 @@ class MCGSGraph:
         nodes = [GraphNode.from_dict(n) for n in d.get("nodes", [])]
         objectives = [ObjectiveMeta.from_dict(o) for o in d.get("objectives", [])]
         meta_state = MetaState.from_dict(d["meta_state"]) if "meta_state" in d else None
+        iteration_state = IterationState.from_dict(d["iteration_state"]) if "iteration_state" in d else None
         return cls(
             config=config,
             nodes=nodes,
@@ -239,6 +267,7 @@ class MCGSGraph:
             objectives=objectives,
             meta_state=meta_state,
             lessons_learned=d.get("lessons_learned", []),
+            iteration_state=iteration_state,
         )
 
     # ── Node operations ──────────────────────────────────────────────────
