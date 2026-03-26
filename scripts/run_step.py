@@ -105,10 +105,17 @@ def _wrap_with_protocol(
     repo_dir: str,
 ) -> Dict[str, Any]:
     """Inject protocol reminder and complete_command into every action output."""
-    action["protocol"] = _PROTOCOL_REMINDER
+    step = action.get("step", "")
+    if step == "iteration_complete" and action.get("should_stop"):
+        action["protocol"] = (
+            "LOOP COMPLETE. The dispatch loop is FINISHED. "
+            "Do NOT call run_step.py again. "
+            "Follow the Phase 3 instructions below to generate the final report."
+        )
+    else:
+        action["protocol"] = _PROTOCOL_REMINDER
 
     # Add complete_command for non-terminal steps
-    step = action.get("step", "")
     if step not in ("iteration_complete",):
         scripts_dir = Path(__file__).parent
         action["complete_command"] = (
@@ -449,6 +456,7 @@ def _action_hpo(
         description="Run hyperparameter optimization (auto-select best untuned node)",
         command=command,
         repo_dir=repo_dir,
+        max_iter=str(config.hpo_max_iter),
     )
 
     return {
@@ -555,17 +563,27 @@ def cmd_next(
         if stop_reason:
             stop_decision = (
                 f"**STOP**: {stop_reason}. "
-                f"Proceed to Phase 3 — read `phases/summary.md` and generate the final report."
+                f"The dispatch loop is FINISHED. Follow the Phase 3 instructions below."
+            )
+            # Inline Phase 3 instructions so the agent doesn't need to read another file
+            phase3_raw = _read_file(skill_path / "phases" / "summary.md")
+            objectives_dir = graph.config.objectives_dir or "objectives"
+            phase3_instructions = (
+                phase3_raw
+                .replace("{SKILL_DIR}", str(skill_path))
+                .replace("{objectives_dir}", objectives_dir)
             )
         else:
             stop_decision = (
                 "No stop condition met. **CONTINUE**: call `run_step.py next` again "
                 "(with `--new-iteration`) to start the next iteration immediately."
             )
+            phase3_instructions = ""
 
         template = _read_instruction_template(skill_path, "iteration_complete")
         instructions = _fill_template(
             template, iteration=str(state.iteration), stop_decision=stop_decision,
+            phase3_instructions=phase3_instructions,
         )
         result = {
             "action": "iteration_complete",

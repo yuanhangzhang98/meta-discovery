@@ -323,8 +323,14 @@ def _run_experiment(
     script_name: str,
     timeout: int,
     fidelity_env: Dict[str, str] | None = None,
-) -> float | None:
-    """Run the experiment script and parse the metric from stdout."""
+) -> float | Dict[str, Any] | None:
+    """Run the experiment script and parse the output from stdout.
+
+    Returns:
+        float  — single-objective mode (script outputs a float)
+        dict   — multi-objective mode (script outputs JSON metrics)
+        None   — failure (timeout, non-zero exit, unparseable output)
+    """
     run_env = {**os.environ}
     if fidelity_env:
         run_env.update(fidelity_env)
@@ -351,26 +357,116 @@ def _run_experiment(
 
     last_line = lines[-1]
 
-    # Try JSON (multi-objective: use first numeric value or a known key)
+    # Try JSON — return the full dict for multi-objective scoring
     try:
         data = json.loads(last_line)
         if isinstance(data, dict):
-            # Use the first numeric value as metric (or 'loss' if present)
-            for key in ("loss", "objective", "metric", "score"):
-                if key in data:
-                    return float(data[key])
-            # Fallback: first numeric value
-            for v in data.values():
-                if isinstance(v, (int, float)):
-                    return float(v)
+            return data
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Try float
+    # Try float (single-objective)
     try:
         return float(last_line)
     except ValueError:
         return None
+
+
+class _ConsensusScorer:
+    """Scores HPO trials using the full consensus pipeline.
+
+    Pre-computes the existing score matrix from graph data (cheap — objective
+    functions just read stored experiment_results). For each HPO trial, injects
+    the trial's scores as a temporary node, recomputes consensus, and returns
+    the trial's consensus score.
+
+    Consensus score is in [0, 1] where lower = better (rank-based), so HPO
+    should always minimize this regardless of the per-objective direction.
+    """
+
+    def __init__(self, graph: "MCGSGraph", objectives_dir: Optional[Path] = None):
+        from consensus import (
+            load_objective_function,
+            evaluate_all_objectives,
+            build_ranking_matrix,
+            compute_kendall_tau_matrix,
+            compute_objective_weights,
+            build_consensus_scores,
+        )
+        self._build_ranking_matrix = build_ranking_matrix
+        self._compute_kendall_tau_matrix = compute_kendall_tau_matrix
+        self._compute_objective_weights = compute_objective_weights
+        self._build_consensus_scores = build_consensus_scores
+
+        obj_dir = objectives_dir or Path(graph.config.objectives_dir)
+        active = graph.get_active_objectives()
+
+        # Load objective functions
+        self.obj_names: List[str] = []
+        self.obj_fns: List[Any] = []
+        for obj_meta in active:
+            try:
+                fn = load_objective_function(obj_dir / obj_meta.filename)
+                self.obj_names.append(obj_meta.name)
+                self.obj_fns.append(fn)
+            except Exception:
+                pass
+
+        self.active = active
+        self.graph = graph
+
+        # Pre-compute existing score matrix from graph (cheap)
+        self.base_score_matrix, base_names, self.base_node_ids = evaluate_all_objectives(
+            graph, obj_dir,
+        )
+        # Align: only use objectives we successfully loaded
+        self.base_score_matrix = {
+            name: scores for name, scores in self.base_score_matrix.items()
+            if name in self.obj_names
+        }
+
+    @property
+    def ready(self) -> bool:
+        return len(self.obj_fns) > 0
+
+    def score(self, experiment_results: Dict[str, Any]) -> float:
+        """Score a trial's experiment results using full consensus.
+
+        Returns consensus score in [0, 1] (lower = better). Returns 1.0 on failure.
+        """
+        # Score the trial with each objective function
+        trial_scores: Dict[str, float] = {}
+        for name, fn in zip(self.obj_names, self.obj_fns):
+            try:
+                s = fn(experiment_results)
+                if s is not None and s == s and isinstance(s, (int, float)):
+                    trial_scores[name] = float(s)
+                else:
+                    trial_scores[name] = float("inf")
+            except Exception:
+                trial_scores[name] = float("inf")
+
+        # Build combined score matrix: existing nodes + trial as temporary node
+        TRIAL_ID = -1
+        combined_matrix: Dict[str, Dict[int, float]] = {}
+        combined_node_ids = self.base_node_ids + [TRIAL_ID]
+        for name in self.obj_names:
+            combined_matrix[name] = dict(self.base_score_matrix.get(name, {}))
+            combined_matrix[name][TRIAL_ID] = trial_scores.get(name, float("inf"))
+
+        # Full consensus pipeline
+        ranking_matrix = self._build_ranking_matrix(combined_matrix)
+        tau_matrix = self._compute_kendall_tau_matrix(ranking_matrix, self.obj_names)
+        weights = self._compute_objective_weights(
+            tau_matrix,
+            self.obj_names,
+            self.active,
+            current_iteration=self.graph.total_iterations,
+            age_decay=self.graph.config.age_decay,
+        )
+        consensus = self._build_consensus_scores(ranking_matrix, weights, combined_node_ids)
+
+        return consensus.get(TRIAL_ID, 1.0)
 
 
 def tune_node(
@@ -439,18 +535,41 @@ def tune_node(
         if node.objective is not None:
             parent_metric = node.objective
 
+        # In multi-objective mode, use full consensus scoring
+        multi_obj = graph.config.multi_objective
+        consensus_scorer: Optional[_ConsensusScorer] = None
+        if multi_obj:
+            consensus_scorer = _ConsensusScorer(graph)
+            if not consensus_scorer.ready:
+                _hpo_log("[HPO] WARNING: multi-objective mode but no objective functions loaded")
+                consensus_scorer = None
+            else:
+                _hpo_log(
+                    f"[HPO] Multi-objective mode: scoring with full consensus pipeline "
+                    f"({len(consensus_scorer.obj_fns)} objectives, "
+                    f"{len(consensus_scorer.base_node_ids)} existing nodes)"
+                )
+
         # Create backend and study
+        # Consensus score is always [0,1] lower=better, so force minimize in multi-obj mode
+        use_minimize = True if consensus_scorer else graph.config.minimize
         backend = get_backend(backend_name)
-        study = backend.create_study(hyper_space, minimize=graph.config.minimize)
+        study = backend.create_study(hyper_space, minimize=use_minimize)
 
         # Warm-start with default params
-        if parent_metric is not None:
+        # In consensus mode, the parent's consensus score is the baseline
+        warm_metric = parent_metric
+        if consensus_scorer and node.experiment_results is not None:
+            warm_metric = consensus_scorer.score(node.experiment_results)
+            _hpo_log(f"[HPO] Parent consensus score: {warm_metric:.4f}")
+        if warm_metric is not None:
             defaults = get_defaults(hyper_space)
-            backend.warm_start(study, defaults, parent_metric)
-            _hpo_log(f"[HPO] Warm-started with parent metric: {parent_metric:.4f}")
+            backend.warm_start(study, defaults, warm_metric)
+            _hpo_log(f"[HPO] Warm-started with metric: {warm_metric:.4f}")
 
         # Optimization loop
-        best_metric = float("inf") if graph.config.minimize else float("-inf")
+        # Consensus is always minimized ([0,1] lower=better)
+        best_metric = float("inf") if use_minimize else float("-inf")
         best_params: Dict[str, Any] = {}
         history: List[Dict[str, Any]] = []
 
@@ -461,19 +580,29 @@ def tune_node(
             modified_code = inject_params(source_code, params)
             hs_file.write_text(modified_code, encoding="utf-8")
 
-            # Run experiment
-            metric = _run_experiment(worktree_dir, script_name, timeout)
+            # Run experiment and score
+            raw_result = _run_experiment(worktree_dir, script_name, timeout)
 
-            if metric is None:
-                metric = float("inf") if graph.config.minimize else float("-inf")
+            if raw_result is None:
+                metric = float("inf") if use_minimize else float("-inf")
                 _hpo_log(f"  Iter {iteration + 1}/{max_iter}: FAILED")
+            elif consensus_scorer and isinstance(raw_result, dict):
+                # Multi-objective: full consensus scoring against existing nodes
+                metric = consensus_scorer.score(raw_result)
+                _hpo_log(f"  Iter {iteration + 1}/{max_iter}: consensus={metric:.6f} params={params}")
+            elif isinstance(raw_result, dict):
+                # Multi-objective but no scorer — should not happen, treat as failure
+                metric = float("inf")
+                _hpo_log(f"  Iter {iteration + 1}/{max_iter}: NO SCORER params={params}")
             else:
+                # Single-objective: raw_result is already a float
+                metric = raw_result
                 _hpo_log(f"  Iter {iteration + 1}/{max_iter}: metric={metric:.6f} params={params}")
 
             backend.observe(study, params, metric)
             history.append({"iteration": iteration, "params": params, "metric": metric})
 
-            is_better = (metric < best_metric) if graph.config.minimize else (metric > best_metric)
+            is_better = (metric < best_metric) if use_minimize else (metric > best_metric)
             if is_better:
                 best_metric = metric
                 best_params = dict(params)
@@ -486,11 +615,12 @@ def tune_node(
             "node_id": node_id,
             "best_params": best_params,
             "best_metric": best_metric,
-            "parent_metric": parent_metric,
+            "parent_metric": warm_metric if warm_metric is not None else parent_metric,
             "history": history,
             "hyper_space_file": hs_rel_path,
             "backend": backend_name,
             "iterations": max_iter,
+            "scoring": "consensus" if consensus_scorer else "single_objective",
         }
 
     finally:

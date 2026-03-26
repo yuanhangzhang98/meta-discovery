@@ -144,6 +144,8 @@ python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.js
 
 Execute the command shown in `instruction.command`. For long-running commands like `hpo`, you may run them in the background. HPO writes real-time progress to `{REPO_DIR}/hpo_progress.log` — tail this file to monitor progress while it runs.
 
+**Do NOT interrupt long-running commands early.** HPO and multi-fidelity tasks are designed to run for their full duration — early termination wastes the work already done. Follow the patience guidance in each step's instructions.
+
 For `post_designer_pipeline`:
 
 1. Run the command — it **automatically reads** `mcgs_design_output.json` from the worktree for parent_edges, short_name, and description. No manual JSON extraction needed.
