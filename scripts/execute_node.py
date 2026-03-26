@@ -31,7 +31,10 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from graph_utils import load_graph, save_graph, _run_git
+from graph_utils import load_graph, save_graph, run_git, symlink_data_dirs
+
+# Backward compat alias
+_run_git = run_git
 
 # ── JSON sanitization ────────────────────────────────────────────────────────
 
@@ -96,25 +99,6 @@ def _extract_json_from_stdout(stdout: str) -> dict | None:
     return None
 
 
-def _symlink_data_dirs(data_dirs: list, repo_dir: Path, worktree_dir: Path) -> None:
-    """Symlink configured data directories into the worktree."""
-    for data_dir in data_dirs:
-        source = repo_dir / data_dir
-        target = worktree_dir / data_dir
-        if not source.exists():
-            print(f"  Warning: data_dir '{data_dir}' not found at {source}", file=sys.stderr)
-            continue
-        if target.exists():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.symlink(str(source), str(target), target_is_directory=source.is_dir())
-            print(f"  Symlinked {data_dir} -> {source}")
-        except OSError:
-            shutil.copytree(str(source), str(target))
-            print(f"  Copied {data_dir} (symlink failed)")
-
-
 def execute_node(
     graph_path: str,
     node_id: int,
@@ -156,24 +140,62 @@ def execute_node(
                 break
         else:
             print(f"Warning: Fidelity tier '{fidelity}' not found in config", file=sys.stderr)
+    elif fidelity is None and graph.config.multi_fidelity and graph.config.fidelity_tiers:
+        # No fidelity specified — default to lowest tier's timeout
+        lowest_tier = graph.config.fidelity_tiers[0]
+        timeout = lowest_tier.get("timeout", timeout)
 
-    # Choose which script to run: experiment_script (multi-objective) or objective_script (single)
+    # Choose which script to run
     multi_objective = graph.config.multi_objective
-    script_name = graph.config.experiment_script if multi_objective else graph.config.objective_script
+    script_name = graph.config.eval_script
     branch = node.branch
     repo_dir = Path(repo_dir).resolve()
+
+    # Lockfile to prevent concurrent evaluation of the same node
+    lockfile_path = Path(tempfile.gettempdir()) / f"mcgs-eval-{node_id}.lock"
+    lock_fd = None
+    try:
+        lock_fd = open(lockfile_path, "x")  # exclusive create — fails if exists
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+    except FileExistsError:
+        # Check if the locking process is still alive
+        try:
+            old_pid = int(lockfile_path.read_text().strip())
+            # os.kill with signal 0 checks existence without killing
+            os.kill(old_pid, 0)
+            print(f"Error: Node {node_id} is already being evaluated (PID {old_pid})", file=sys.stderr)
+            return None
+        except (ValueError, OSError, ProcessLookupError):
+            # Stale lockfile — remove and retry
+            lockfile_path.unlink(missing_ok=True)
+            lock_fd = open(lockfile_path, "x")
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
 
     # Create a temporary worktree
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"mcgs-eval-{node_id}-"))
 
     try:
+        # Prune stale worktrees and clear any stale checkout of this branch
+        _run_git(["worktree", "prune"], cwd=repo_dir)
+        wt_list = _run_git(["worktree", "list", "--porcelain"], cwd=repo_dir)
+        current_wt = None
+        for line in wt_list.stdout.split("\n"):
+            if line.startswith("worktree "):
+                current_wt = line[len("worktree "):]
+            if line.strip() == f"branch refs/heads/{branch}" and current_wt:
+                print(f"Removing stale worktree for {branch} at {current_wt}...")
+                _run_git(["worktree", "remove", current_wt, "--force"], cwd=repo_dir, check=False)
+        _run_git(["worktree", "prune"], cwd=repo_dir)
+
         # Create worktree from the node's branch
         print(f"Creating worktree for {branch} at {worktree_dir}...")
         _run_git(["worktree", "add", str(worktree_dir), branch], cwd=repo_dir)
 
         # Symlink data directories into worktree
         if graph.config.data_dirs:
-            _symlink_data_dirs(graph.config.data_dirs, repo_dir, worktree_dir)
+            symlink_data_dirs(graph.config.data_dirs, repo_dir, worktree_dir)
 
         # Check that the script exists
         script_path = worktree_dir / script_name
@@ -273,6 +295,13 @@ def execute_node(
         # Belt-and-suspenders: remove the directory if git didn't
         if worktree_dir.exists():
             shutil.rmtree(worktree_dir, ignore_errors=True)
+        # Release lockfile
+        if lock_fd is not None:
+            try:
+                lock_fd.close()
+            except Exception:
+                pass
+            lockfile_path.unlink(missing_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

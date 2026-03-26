@@ -54,9 +54,11 @@ def _hpo_log(msg: str) -> None:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from graph_utils import (
-    ParentEdge, load_graph, save_graph,
-    _run_git, git_create_worktree, git_remove_worktree, git_commit_all,
+    MCGSGraph, ParentEdge, load_graph, save_graph,
+    run_git, managed_worktree, git_commit_all, symlink_data_dirs,
 )
+# Backward compat alias
+_run_git = run_git
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -198,7 +200,6 @@ class OptunaBackend(HPOBackend):
 
         # Store space config for suggest()
         study._hyper_space = hyper_space  # type: ignore[attr-defined]
-        study._trial_params = {}  # type: ignore[attr-defined]
         return study
 
     def suggest(self, study: Any) -> Dict[str, Any]:
@@ -226,8 +227,6 @@ class OptunaBackend(HPOBackend):
                 # Fallback: use default
                 params[name] = cfg.get("default", 0)
 
-        # Store trial for observe()
-        study._trial_params[id(trial)] = trial  # type: ignore[attr-defined]
         study._current_trial = trial  # type: ignore[attr-defined]
         return params
 
@@ -408,15 +407,18 @@ def tune_node(
     _hpo_log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
 
     # Determine experiment script
-    multi_obj = graph.config.multi_objective
-    script_name = graph.config.experiment_script if multi_obj else graph.config.objective_script
+    script_name = graph.config.eval_script
 
     # Create worktree
     repo_dir_path = Path(repo_dir).resolve()
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"mcgs-hpo-{node_id}-"))
 
     try:
-        _run_git(["worktree", "add", str(worktree_dir), node.branch], cwd=repo_dir_path)
+        run_git(["worktree", "add", str(worktree_dir), node.branch], cwd=repo_dir_path)
+
+        # Symlink data directories into worktree
+        if graph.config.data_dirs:
+            symlink_data_dirs(graph.config.data_dirs, repo_dir_path, worktree_dir)
 
         # Find HYPER_SPACE file
         hs_file = find_hyper_space_file(worktree_dir, hyper_space_file or graph.config.hyper_space_file)
@@ -498,7 +500,7 @@ def tune_node(
             _hpo_log_fh = None
         # Clean up worktree
         try:
-            _run_git(["worktree", "remove", str(worktree_dir), "--force"], cwd=repo_dir_path, check=False)
+            run_git(["worktree", "remove", str(worktree_dir), "--force"], cwd=repo_dir_path, check=False)
         except Exception:
             pass
         if worktree_dir.exists():
@@ -526,13 +528,13 @@ def register_tuned_node(
 
     repo_dir_path = Path(repo_dir).resolve()
     new_id = graph.next_id
-    new_branch = f"mcgs/node-{new_id}"
+    new_branch = MCGSGraph.node_branch_name(new_id)
 
     # Create worktree from parent
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"mcgs-hpo-reg-{new_id}-"))
 
     try:
-        _run_git(["worktree", "add", str(worktree_dir), parent.branch], cwd=repo_dir_path)
+        run_git(["worktree", "add", str(worktree_dir), parent.branch], cwd=repo_dir_path)
 
         # Find and update HYPER_SPACE
         hs_file = find_hyper_space_file(worktree_dir, hyper_space_file or graph.config.hyper_space_file)
@@ -544,12 +546,12 @@ def register_tuned_node(
         hs_file.write_text(modified_code, encoding="utf-8")
 
         # Create new branch and commit
-        _run_git(["checkout", "-b", new_branch], cwd=worktree_dir)
+        run_git(["checkout", "-b", new_branch], cwd=worktree_dir)
         git_commit_all(f"MCGS node {new_id}: HPO_tuned_{parent.short_name}", repo_dir=worktree_dir)
 
     finally:
         try:
-            _run_git(["worktree", "remove", str(worktree_dir), "--force"], cwd=repo_dir_path, check=False)
+            run_git(["worktree", "remove", str(worktree_dir), "--force"], cwd=repo_dir_path, check=False)
         except Exception:
             pass
         if worktree_dir.exists():

@@ -22,6 +22,7 @@ What this does:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,8 @@ from graph_utils import (
     git_checkout,
     git_commit_all,
     git_current_branch,
-    _run_git,
+    git_list_branches,
+    run_git,
 )
 
 
@@ -130,10 +132,21 @@ def init_mcgs(
         status="pending",
     )
 
+    # Detect existing mcgs/node-* branches and set next_id past the highest one
+    existing_branches = git_list_branches(repo_dir)
+    max_existing_id = 0
+    for b in existing_branches:
+        m = re.match(r"mcgs/node-(\d+)$", b.strip())
+        if m:
+            max_existing_id = max(max_existing_id, int(m.group(1)))
+    next_id = max(1, max_existing_id + 1)
+    if next_id > 1:
+        print(f"  Detected existing branches up to mcgs/node-{max_existing_id}, setting next_id={next_id}")
+
     graph = MCGSGraph(
         config=config,
         nodes=[node_0],
-        next_id=1,
+        next_id=next_id,
         total_iterations=0,
     )
 
@@ -157,16 +170,27 @@ def init_mcgs(
             graph.objectives.append(obj_meta)
             print(f"  Created initial objective: {obj_path}")
 
-    # Step 5: Save graph.json and commit
+    # Step 5: Save graph.json and commit (only stage MCGS-related files)
     save_graph(graph, graph_path)
 
-    # Commit the graph file on the current branch
-    git_commit_all("Initialize MCGS graph with baseline node-0", repo_dir)
+    commit_msg = "Initialize MCGS graph with baseline node-0"
+    files_to_stage = ["mcgs_graph.json"]
+    if multi_objective and (repo_dir / objectives_dir).exists():
+        files_to_stage.append(objectives_dir)
+    for f in files_to_stage:
+        run_git(["add", f], cwd=repo_dir)
+    result = run_git(["status", "--porcelain"], cwd=repo_dir)
+    if result.stdout.strip():
+        run_git(["commit", "-m", commit_msg], cwd=repo_dir)
 
     # Also commit graph.json on the node-0 branch
     git_checkout(node_0_branch, repo_dir)
     save_graph(graph, graph_path)
-    git_commit_all("Initialize MCGS graph with baseline node-0", repo_dir)
+    for f in files_to_stage:
+        run_git(["add", f], cwd=repo_dir)
+    result = run_git(["status", "--porcelain"], cwd=repo_dir)
+    if result.stdout.strip():
+        run_git(["commit", "-m", commit_msg], cwd=repo_dir)
 
     # Return to original branch
     git_checkout(original_branch, repo_dir)

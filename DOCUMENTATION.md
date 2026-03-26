@@ -69,8 +69,8 @@ scripts/
 ├── consensus.py            # Multi-objective consensus aggregation
 ├── compute_ucb.py          # UCB score computation
 ├── register_node.py        # Register a new node in the graph
-├── run_step.py             # Iteration state machine (next/complete)
-├── run_iteration.py        # Full post-designer pipeline (Steps 7-11)
+├── run_step.py             # Iteration state machine (next/complete, self-contained instructions)
+├── run_iteration.py        # Full post-designer pipeline (auto-reads parent_edges)
 ├── validate_agent_output.py # Validate subagent outputs (auto-fixes reference_weights)
 ├── multi_fidelity.py       # Multi-fidelity execution engine
 └── hpo_tune.py             # Hyperparameter optimization
@@ -389,7 +389,15 @@ python run_step.py next \
     --repo-dir .
 ```
 
-Returns JSON with `action` (what to do), `step` (step name), `description`, and either `prompt_context` (for LLM tasks) or `command` (for deterministic tasks).
+Returns JSON with:
+- `action` — what to do (e.g., `spawn_planner`, `run_command`)
+- `step` — step name for the `complete` call
+- `instructions` — **self-contained step-by-step directions** (survives context compression)
+- `protocol` — one-line dispatch loop reminder
+- `complete_command` — the exact command to advance the state machine
+- `prompt_context` (for LLM tasks) or `command` (for deterministic tasks)
+
+Instruction templates live in `instructions/*.md` and are filled with concrete values at runtime.
 
 **Complete a step:**
 ```bash
@@ -406,6 +414,7 @@ Steps in brackets are conditional on periodic intervals configured in GraphConfi
 
 **Key features:**
 - Periodic tasks are never forgotten — the state machine checks intervals automatically
+- **Self-contained instructions**: every output includes an `instructions` field with step-by-step directions, so the orchestrator can execute any action even if the original loop.md instructions have been compressed away
 - Prompt context is assembled for each subagent (guide file + graph state + task-specific data)
 - State persists in `mcgs_graph.json` via `iteration_state` — survives crashes
 - Lightweight planner mode: skip the Planner subagent by passing a hand-crafted result to `complete`
@@ -435,9 +444,10 @@ python run_iteration.py run \
     --parent-branch mcgs/node-3 \
     --graph mcgs_graph.json \
     --repo-dir . \
-    --parent-edges '[{"node_id": 3, "weight": 0.7}, {"node_id": 7, "weight": 0.3}]' \
     --timeout 300
 ```
+
+`--parent-edges` is optional — the pipeline **auto-reads** `reference_weights` from `mcgs_design_output.json` in the worktree if not provided. Uses direct Python imports (no subprocesses) for efficiency.
 
 **Output**: JSON with `validation`, `commit` (node_id, branch), and `execution` (status, objective, ucb_score).
 

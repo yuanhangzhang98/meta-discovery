@@ -31,7 +31,7 @@ def register_node(
     branch: str,
     parent_edges_json: str,
     description: str = "",
-    increment_iteration: bool = True,
+    increment_iteration: bool = False,
     is_hpo_tuned: bool = False,
 ) -> int:
     """Register a new node in the MCGS graph.
@@ -53,8 +53,7 @@ def register_node(
     # Parse and validate parent edges
     raw_edges = json.loads(parent_edges_json)
     if not isinstance(raw_edges, list):
-        print("Error: parent-edges must be a JSON array", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("parent-edges must be a JSON array")
 
     edges = []
     total_weight = 0.0
@@ -62,9 +61,7 @@ def register_node(
         nid = entry.get("node_id")
         w = entry.get("weight")
         if nid is None or w is None:
-            print(f"Error: each parent edge must have 'node_id' and 'weight': {entry}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"each parent edge must have 'node_id' and 'weight': {entry}")
         edges.append(ParentEdge(node_id=int(nid), weight=float(w)))
         total_weight += float(w)
 
@@ -104,8 +101,8 @@ def main():
     parser.add_argument("--parent-edges", required=True,
                         help='JSON array of parent edges: [{"node_id": 3, "weight": 0.7}, ...]')
     parser.add_argument("--description", default="", help="Description of the modification")
-    parser.add_argument("--no-increment", action="store_true",
-                        help="Don't increment total_iterations")
+    parser.add_argument("--increment-iteration", action="store_true",
+                        help="Increment total_iterations (default: false, run_step.py manages this)")
     parser.add_argument("--hpo-tuned", action="store_true",
                         help="Mark node as HPO-tuned")
     args = parser.parse_args()
@@ -116,7 +113,7 @@ def main():
         branch=args.branch,
         parent_edges_json=args.parent_edges,
         description=args.description,
-        increment_iteration=not args.no_increment,
+        increment_iteration=args.increment_iteration,
         is_hpo_tuned=args.hpo_tuned,
     )
 

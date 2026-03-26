@@ -1,5 +1,10 @@
 # Phase 2: The MCGS Loop
 
+> **Context-loss safety**: Every `run_step.py next` output includes an `instructions` field
+> with complete step-by-step directions and a `complete_command` field. If you've lost context
+> about how to handle an action, just follow those fields — they contain everything you need.
+> If you've lost track of the dispatch loop entirely, re-read `phases/loop_cheatsheet.md`.
+
 The iteration loop is driven by `run_step.py` — a state machine that tracks progress, triggers periodic tasks automatically, and tells you exactly what to do next. You no longer need to remember 13 steps or track iteration counts for periodic tasks.
 
 ## How the Loop Works
@@ -17,7 +22,7 @@ while not done:
         "run_command"              → execute the command, then complete
         "spawn_designer"           → spawn subagent, then complete
         "report"                   → display summary to user, then complete
-        "iteration_complete"       → break — ask user to continue or stop
+        "iteration_complete"       → if should_stop: Phase 3; else: next --new-iteration
 
     run_step.py complete --graph {REPO_DIR}/mcgs_graph.json --step {step} --result '{result_json}'
 ```
@@ -141,10 +146,8 @@ Execute the command shown in `instruction.command`. For long-running commands li
 
 For `post_designer_pipeline`:
 
-1. Read `mcgs_design_output.json` from the worktree to get `reference_weights`
-2. Replace `{parent_edges}` in the command with the reference_weights JSON
-3. Run the command
-4. **If validation fails** → SendMessage to Designer (1 retry), then fallback
+1. Run the command — it **automatically reads** `mcgs_design_output.json` from the worktree for parent_edges, short_name, and description. No manual JSON extraction needed.
+2. **If validation fails** → SendMessage to Designer (1 retry), then fallback
 
 Complete with the command's JSON output:
 ```bash
@@ -213,10 +216,11 @@ python {SKILL_DIR}/scripts/run_step.py complete --graph {REPO_DIR}/mcgs_graph.js
 
 ### `iteration_complete`
 
-One iteration is done. Ask the user:
-- **Continue?** → call `run_step.py next` again (it auto-starts a new iteration)
-- **Stop?** → proceed to Phase 3 — read `phases/summary.md`
-- **Converged?** If the last K iterations show no improvement, suggest stopping
+One iteration is done. The output includes `should_stop` and `stop_reason` fields:
+- If `should_stop` is **false**: call `run_step.py next --new-iteration` to continue automatically
+- If `should_stop` is **true**: proceed to Phase 3 — read `phases/summary.md`
+
+Stop conditions are checked automatically: `max_iterations`, `max_no_improve`, `max_time_minutes` (configured in `mcgs_graph.json` under `config`). No user interaction needed.
 
 ## Forcing a New Iteration
 

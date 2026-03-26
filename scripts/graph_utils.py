@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -204,6 +207,10 @@ class GraphConfig:
     hyper_space_file: str = ""            # path to file containing HYPER_SPACE (relative to repo root)
     # Data isolation: paths (relative to repo root) symlinked into eval worktrees
     data_dirs: List[str] = field(default_factory=list)
+    # Stop conditions (0 = disabled)
+    max_iterations: int = 0              # stop after N iterations
+    max_no_improve: int = 0              # stop after N iterations with no improvement over best
+    max_time_minutes: int = 0            # stop after N minutes (wall clock from first iteration)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -216,6 +223,11 @@ class GraphConfig:
     def multi_objective(self) -> bool:
         """Whether multi-objective mode is active."""
         return bool(self.experiment_script)
+
+    @property
+    def eval_script(self) -> str:
+        """The script to run for evaluation (experiment_script or objective_script)."""
+        return self.experiment_script if self.multi_objective else self.objective_script
 
 
 @dataclass
@@ -362,6 +374,68 @@ class MCGSGraph:
         if text not in self.lessons_learned:
             self.lessons_learned.append(text)
 
+    def get_best_node(self) -> Optional[GraphNode]:
+        """Get the node with the best objective value. Returns None if no evaluated nodes."""
+        evaluated = [n for n in self.nodes if n.status == "evaluated" and n.objective is not None]
+        if not evaluated:
+            return None
+        if self.config.minimize:
+            return min(evaluated, key=lambda n: n.objective)
+        return max(evaluated, key=lambda n: n.objective)
+
+    @staticmethod
+    def node_branch_name(node_id: int) -> str:
+        """Standard branch name for a node."""
+        return f"mcgs/node-{node_id}"
+
+    def check_stop_conditions(self) -> Optional[str]:
+        """Check whether the search should stop.
+
+        Returns a reason string if a stop condition is met, None otherwise.
+        """
+        cfg = self.config
+        iters = self.total_iterations
+
+        # Max iterations
+        if cfg.max_iterations > 0 and iters >= cfg.max_iterations:
+            return f"Reached max_iterations ({cfg.max_iterations})"
+
+        # Max wall-clock time (compare first node timestamp to now)
+        if cfg.max_time_minutes > 0 and self.nodes:
+            first_ts = self.nodes[0].timestamp
+            if first_ts:
+                try:
+                    start = datetime.fromisoformat(first_ts)
+                    elapsed = (datetime.now(timezone.utc) - start).total_seconds() / 60
+                    if elapsed >= cfg.max_time_minutes:
+                        return f"Reached max_time_minutes ({cfg.max_time_minutes}, elapsed={elapsed:.0f})"
+                except (ValueError, TypeError):
+                    pass
+
+        # No improvement over last N iterations
+        if cfg.max_no_improve > 0 and iters >= cfg.max_no_improve:
+            best = self.get_best_node()
+            if best is not None:
+                # Count consecutive non-improving iterations from the tail
+                evaluated = sorted(
+                    [n for n in self.nodes if n.status == "evaluated" and n.objective is not None],
+                    key=lambda n: n.id,
+                )
+                if len(evaluated) >= cfg.max_no_improve + 1:
+                    recent = evaluated[-(cfg.max_no_improve):]
+                    all_worse = all(
+                        (n.objective >= best.objective if cfg.minimize else n.objective <= best.objective)
+                        and n.id != best.id
+                        for n in recent
+                    )
+                    if all_worse:
+                        return (
+                            f"No improvement in last {cfg.max_no_improve} iterations "
+                            f"(best: node {best.id}, objective={best.objective:.4f})"
+                        )
+
+        return None
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # JSON I/O
@@ -389,7 +463,7 @@ def save_graph(graph: MCGSGraph, path: str | Path) -> None:
 # Git operations
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _run_git(args: List[str], cwd: str | Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run_git(args: List[str], cwd: str | Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command and return the result."""
     cmd = ["git"] + args
     result = subprocess.run(
@@ -401,6 +475,10 @@ def _run_git(args: List[str], cwd: str | Path | None = None, check: bool = True)
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
+
+
+# Backward-compatible alias
+_run_git = run_git
 
 
 def git_init(repo_dir: str | Path) -> None:
@@ -481,6 +559,55 @@ def git_list_branches(repo_dir: str | Path = ".", pattern: str = "mcgs/node-*") 
     """List branches matching a pattern."""
     result = _run_git(["branch", "--list", pattern], cwd=repo_dir, check=False)
     return [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
+
+
+@contextmanager
+def managed_worktree(
+    branch: str,
+    repo_dir: str | Path = ".",
+    prefix: str = "mcgs-wt-",
+    data_dirs: Optional[List[str]] = None,
+) -> Generator[Path, None, None]:
+    """Context manager that creates a temporary worktree and cleans it up on exit.
+
+    Usage:
+        with managed_worktree("mcgs/node-5", repo_dir=".") as wt:
+            # wt is a Path to the worktree directory
+            do_work(wt)
+        # worktree is removed automatically
+    """
+    repo_dir = Path(repo_dir).resolve()
+    worktree_dir = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        run_git(["worktree", "add", str(worktree_dir), branch], cwd=repo_dir)
+        if data_dirs:
+            symlink_data_dirs(data_dirs, repo_dir, worktree_dir)
+        yield worktree_dir
+    finally:
+        try:
+            run_git(["worktree", "remove", str(worktree_dir), "--force"],
+                    cwd=repo_dir, check=False)
+        except Exception:
+            pass
+        if worktree_dir.exists():
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def symlink_data_dirs(data_dirs: List[str], repo_dir: Path, worktree_dir: Path) -> None:
+    """Symlink configured data directories into a worktree."""
+    for data_dir in data_dirs:
+        source = repo_dir / data_dir
+        target = worktree_dir / data_dir
+        if not source.exists():
+            print(f"  Warning: data_dir '{data_dir}' not found at {source}", file=sys.stderr)
+            continue
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(str(source), str(target), target_is_directory=source.is_dir())
+        except OSError:
+            shutil.copytree(str(source), str(target))
 
 
 def cleanup_stale_worktrees(repo_dir: str | Path = ".") -> List[str]:

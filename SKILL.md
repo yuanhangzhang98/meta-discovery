@@ -23,6 +23,7 @@ Read `phases/setup.md` and `phases/notes.md`. Understand the project, write the 
 
 ### Phase 2: The MCGS Loop (iterative)
 Read `phases/loop.md`. This is the main iteration loop — planner, designer, execute, score, UCB.
+Every `run_step.py next` output includes self-contained `instructions` you can follow even if this file is compressed. If you lose track of the loop, re-read `phases/loop_cheatsheet.md`.
 
 ### Phase 3: Summary (one-time, at the end)
 Read `phases/summary.md`. Report results, show best diff, offer to apply.

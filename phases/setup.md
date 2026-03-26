@@ -27,7 +27,7 @@ Based on your understanding, recommend single-objective or multi-objective mode:
 Confirm with the user:
 - Your understanding of the research goal
 - The mode (single vs multi-objective)
-- How many iterations to run (default: 10–20)
+- Stop conditions: `max_iterations` (default: 20), `max_no_improve` (default: 5), `max_time_minutes` (0 = unlimited). Set these in `mcgs_graph.json` config after init.
 - Timeout per evaluation (default: 300s; adjust based on how long experiments take)
 
 ## 1.3 Write the Experiment Script

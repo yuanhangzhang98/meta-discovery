@@ -172,16 +172,20 @@ def _kendall_tau_pure(ranks_a: List[int], ranks_b: List[int]) -> float:
     return (concordant - discordant) / (denom_a * denom_b) ** 0.5
 
 
+try:
+    from scipy.stats import kendalltau as _scipy_kendalltau
+except ImportError:
+    _scipy_kendalltau = None
+
+
 def _kendall_tau(ranks_a: List[int], ranks_b: List[int]) -> float:
     """Compute Kendall tau using scipy if available, else pure Python."""
-    try:
-        from scipy.stats import kendalltau
-        tau, _ = kendalltau(ranks_a, ranks_b)
+    if _scipy_kendalltau is not None:
+        tau, _ = _scipy_kendalltau(ranks_a, ranks_b)
         if tau != tau:  # NaN
             return 0.0
         return float(tau)
-    except ImportError:
-        return _kendall_tau_pure(ranks_a, ranks_b)
+    return _kendall_tau_pure(ranks_a, ranks_b)
 
 
 def compute_kendall_tau_matrix(
