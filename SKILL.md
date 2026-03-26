@@ -28,6 +28,9 @@ Every `run_step.py next` output includes self-contained `instructions` you can f
 ### Phase 3: Summary (one-time, at the end)
 Read `phases/summary.md`. Report results, show best diff, offer to apply.
 
+### Phase 4: Feedback (optional, at the end)
+Read `phases/feedback.md`. Reflect on the session and file skill improvement feedback as GitHub issues.
+
 ## When to Read Reference Files
 
 Read these **before spawning the corresponding subagent** — inject their content into the subagent prompt:
@@ -62,3 +65,4 @@ For full documentation of all scripts, data model, and configuration, see `DOCUM
 3. Read `phases/loop.md`
 4. Run the MCGS loop
 5. Read `phases/summary.md` when done
+6. (Optional) Read `phases/feedback.md` to file skill feedback

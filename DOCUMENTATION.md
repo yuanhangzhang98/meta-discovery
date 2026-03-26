@@ -21,7 +21,8 @@ For the lightweight project index, see [`CLAUDE.md`](CLAUDE.md).
 9. [Hyperparameter Optimization](#9-hyperparameter-optimization)
 10. [Validation and Feedback](#10-validation-and-feedback)
 11. [Conventions and Patterns](#11-conventions-and-patterns)
-12. [File Inventory](#12-file-inventory)
+12. [Phase 4: Feedback](#12-phase-4-feedback)
+13. [File Inventory](#13-file-inventory)
 
 ---
 
@@ -792,7 +793,46 @@ HYPER_SPACE = {
 
 ---
 
-## 12. File Inventory
+## 12. Phase 4: Feedback
+
+After the research report (Phase 3), the orchestrator can optionally reflect on the session and file structured GitHub issues to improve the skill. This creates a continuous feedback loop from research sessions to skill maintenance.
+
+### 12.1 Workflow
+
+1. **Reflect**: The orchestrator reviews the session for bugs, missing features, confusing instructions, and edge cases
+2. **Check access**: `python scripts/create_feedback_issues.py --check --repo yuanhangzhang98/meta-discovery`
+3. **File issues**: Write `feedback_items.json` and run the script in batch mode
+4. **Fallback**: If `gh` is unavailable, feedback is written to `mcgs_report/skill_feedback.md`
+
+See `phases/feedback.md` for full orchestrator instructions.
+
+### 12.2 `create_feedback_issues.py`
+
+**Location**: `scripts/create_feedback_issues.py`
+
+Wraps the `gh` CLI to create GitHub issues with session metadata and deduplication.
+
+**Modes:**
+- `--check`: Verify `gh` auth and list existing `skill-feedback` issues
+- `--batch <file>`: File multiple issues from a JSON array
+- `--category`, `--title`, `--body`, `--suggested-fix`: File a single issue
+- `--dry-run`: Preview without creating issues
+
+**Labels**: Every issue gets `skill-feedback` plus a category label (`bug`, `enhancement`, `documentation`, `edge-case`).
+
+**Session metadata**: Auto-extracted from `mcgs_graph.json` — iterations, node counts, mode, stop reason.
+
+**Deduplication**: Checks for existing open issues with matching titles before creating.
+
+**Fallback**: If `gh` is not authenticated, writes to `mcgs_report/skill_feedback.md`.
+
+### 12.3 Maintainer Agents
+
+Issues labeled `skill-feedback` can be resolved by maintainer agents. See `instructions/maintainer.md` for the workflow: list issues, read descriptions, create fix branches, open PRs scoped to one issue each.
+
+---
+
+## 13. File Inventory
 
 ```
 meta-discovery/
@@ -807,6 +847,7 @@ meta-discovery/
 │   ├── setup.md                     # Phase 1: project understanding, experiment script, init
 │   ├── loop.md                      # Phase 2: the MCGS iteration loop (Steps 1–13)
 │   ├── summary.md                   # Phase 3: report results, offer to apply best design
+│   ├── feedback.md                  # Phase 4: reflect on session, file GitHub issues
 │   └── notes.md                     # Reference notes on subagents, git, errors, convergence
 │
 ├── references/                      # Agent prompt guides (injected into subagent prompts)
@@ -832,14 +873,15 @@ meta-discovery/
     ├── plot_convergence.py          # Convergence curve + node comparison bar chart
     ├── plot_dag.py                  # DAG visualization (graphviz default, sugiyama fallback)
     ├── plot_objectives.py           # Combined objective analysis figure (multi-obj only)
-    └── generate_report.py           # LaTeX report scaffold + figure orchestrator
+    ├── generate_report.py           # LaTeX report scaffold + figure orchestrator
+    └── create_feedback_issues.py    # GitHub issue creation from session feedback
 ```
 
 **Runtime artifacts** (created in user's project directory):
 - `mcgs_graph.json` — search state (the single source of truth)
 - `mcgs_objectives/` — generated objective .py files
 - `mcgs/node-*` — git branches for each design
-- `mcgs_report/` — generated LaTeX report, figures, and compiled PDF
+- `mcgs_report/` — generated LaTeX report, figures, compiled PDF, and optional `skill_feedback.md`
 
 ---
 

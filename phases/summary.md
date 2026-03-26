@@ -51,3 +51,11 @@ In multi-objective mode, also report:
 
 12. **Compile the report**: Run `pdflatex` twice (for cross-references), or call `compile_pdf()`.
     Tell the user where the final PDF is.
+
+---
+
+## Next: Feedback (Optional)
+
+13. If you encountered issues with the meta-discovery skill during this session
+    (bugs, confusing instructions, missing features, edge cases), proceed to
+    Phase 4 — read `phases/feedback.md` to file structured feedback.
